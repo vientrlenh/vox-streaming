@@ -2,11 +2,13 @@ package queue
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl/scram"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"go.uber.org/zap"
 )
@@ -27,6 +29,14 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 	writers := make(map[string]*kafka.Writer, len(topics))
 
 	for _, topic := range topics {
+		var transport *kafka.Transport
+		if cfg.TLSEnabled || cfg.SASLUser != "" {
+			mechanism, _ := scram.Mechanism(scram.SHA256, cfg.SASLUser, cfg.SASLPass)
+			transport = &kafka.Transport{
+				SASL: mechanism, 
+				TLS: &tls.Config{},
+			}
+		}
 		w := &kafka.Writer{
 			Addr:         kafka.TCP(cfg.Brokers...),
 			Topic:        topic,
@@ -43,6 +53,7 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 					zap.String("msg", fmt.Sprintf(msg, args...)),
 				)
 			}),
+			Transport: transport,
 		}
 
 		writers[topic] = w

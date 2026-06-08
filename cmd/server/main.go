@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/segmentio/kafka-go"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
+	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/queue"
 	webrtctransport "github.com/vientrlenh/vox-streaming/internal/transport/webrtc"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
@@ -27,10 +28,25 @@ func main() {
 	logger, _ := zap.NewProduction()
 	defer logger.Sync()
 
-	kafkaCfg := queue.DefaultConfig(
-		[]string{"kafka:9092"}, 
-		"vox-streaming",
+	brokers := os.Getenv("KAFKA_BROKERS")
+	if brokers == "" {
+		brokers = "kafka:9092"
+	}
+	groupID := os.Getenv("KAFKA_CONSUMER_GROUP")
+	if groupID == "" {
+		groupID = "vox-streaming"
+	}
+
+	kafkaCfg := queue.NewConfig(
+		queue.DefaultConfig(
+			strings.Split(brokers, ","), 
+			groupID,
+		),
+		os.Getenv("KAFKA_TLS_ENABLED") == "true",
+		os.Getenv("KAFKA_USERNAME"), 
+		os.Getenv("KAFKA_PASSWORD"),
 	)
+
 
 	startupCtx, startupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer startupCancel()
@@ -48,6 +64,7 @@ func main() {
 		logger.Fatal("publisher init failed", zap.Error(err))
 	}
 
+
 	streamUseCase := usecase.NewStreamUseCase(publisher, logger)
 	
 	iceServers := buildICEServers()
@@ -56,17 +73,26 @@ func main() {
 		frameIntervalSecs = 5
 	}
 
-	allowedOrigins := []string{
-		os.Getenv("ALLOWED_ORIGIN"), 
-		"http://localhost:5173",
-	}
+	allowedOrigins := parseAllowedOrigins()
 
 	jwtValidator, err := auth.NewValidator()
 	if err != nil {
 		logger.Fatal("jwt validator failed", zap.Error(err))
 	}
 
-	broadCaster := webrtctransport.NewRoomBroadcaster()
+	redisCfg := cache.DefaultConfig(os.Getenv("REDIS_ADDR"))
+	redisCfg.Password = os.Getenv("REDIS_PASSWORD")
+	redisClient, err := cache.NewClient(redisCfg)
+	if err != nil {
+		logger.Fatal("redis connect failed", zap.Error(err))
+	}
+	defer redisClient.Close()
+
+	sessionRegistry := cache.NewSessionRegistry(redisClient)
+	broadCaster := webrtctransport.NewRedisBroadcaster(redisClient, logger)
+	monitorUseCase := usecase.NewMonitorUseCase(sessionRegistry, broadCaster, logger)
+
+
 
 	webrtcHandler := webrtctransport.NewHandler(
 		webrtctransport.PeerConfig{
@@ -211,7 +237,7 @@ func main() {
 }
 
 
-func handleFrameReady(logger *zap.Logger, bc *webrtctransport.RoomBroadcaster) queue.HandlerFunc {
+func handleFrameReady(logger *zap.Logger, bc *webrtctransport.RedisBroadcaster) queue.HandlerFunc {
 	return func(ctx context.Context, msg kafka.Message) error {
 		var event domain.FrameReadyEvent
 		if err := json.Unmarshal(msg.Value, &event); err != nil {
@@ -220,7 +246,7 @@ func handleFrameReady(logger *zap.Logger, bc *webrtctransport.RoomBroadcaster) q
 
 		// lưu kết quả vào db và notify cho spring boot service
 		// ...
-		bc.Publish(event.RoomID, webrtctransport.FrameNotification{
+		bc.Publish(ctx, event.RoomID, webrtctransport.FrameNotification{
 			StreamID: event.StreamID, 
 			StreamType: event.StreamType, 
 			FrameURL: event.FrameURL,
@@ -279,4 +305,21 @@ func buildICEServers() []pwebrtc.ICEServer {
 		})
 	}
 	return servers
+}
+
+func parseAllowedOrigins() []string {
+	raw := os.Getenv("ALLOWED_ORIGINS")
+	if raw == "" {
+		raw = os.Getenv("ALLOWED_ORIGIN")
+	}
+	if raw == "" {
+		return []string{"http://localhost:5173"}
+	}
+	var origins []string 
+	for _, o := range strings.Split(raw, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			origins = append(origins, o)
+		}
+	}
+	return origins
 }

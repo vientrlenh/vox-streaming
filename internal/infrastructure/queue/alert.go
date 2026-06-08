@@ -76,7 +76,8 @@ func SlackAlert(webhookURL string, logger *zap.Logger) AlertFunc {
 		}
 
 		body, _ := json.Marshal(payload)
-		res, err := http.Post(webhookURL, "application/json", bytes.NewReader(body))
+		client := &http.Client{Timeout: 5 * time.Second}
+		res, err := client.Post(webhookURL, "application/json", bytes.NewReader(body))
 		if err != nil {
 			logger.Error("slack alert failed", zap.Error(err))
 			return

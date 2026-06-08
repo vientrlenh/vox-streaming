@@ -13,44 +13,58 @@ const (
 )
 
 type FrameReadyEvent struct {
-	EventID       string    `json:"event_id"`
-	RoomID        string    `json:"room_id"`
-	ParticipantID string    `json:"participant_id"`
-	StreamID      string    `json:"stream_id"`
-	StreamType    string    `json:"stream_type"`
-	FrameURL      string    `json:"frame_url"`
-	CapturedAt    time.Time `json:"captured_at"`
-	SequenceNo    int64     `json:"sequence_no"`
+	EventID       string    `json:"eventId"`
+	RoomID        string    `json:"roomId"`
+	ParticipantID string    `json:"participantId"`
+	StreamID      string    `json:"streamId"`
+	StreamType    string    `json:"streamType"`
+	FrameURL      string    `json:"frameUrl"`
+	CapturedAt    time.Time `json:"capturedAt"`
+	SequenceNo    int64     `json:"sequenceNo"`
 }
 
 
 type StreamStartedEvent struct {
-	EventID 		string			`json:"event_id"`
-	RoomID			string 			`json:"room_id"`
-	ParticipantID	string			`json:"participant_id"`
-	StreamID 		string			`json:"stream_id"`
-	StreamType 		string			`json:"stream_type"`
-	StartedAt 		time.Time 		`json:"started_at"`
+	EventID 		string			`json:"eventId"`
+	RoomID			string 			`json:"roomId"`
+	ParticipantID	string			`json:"participantId"`
+	StreamID 		string			`json:"streamId"`
+	StreamType 		string			`json:"streamType"`
+	StartedAt 		time.Time 		`json:"startedAt"`
 }
 
 type StreamEndedEvent struct {
-	EventID 		string 			`json:"event_id"`
-	RoomID			string			`json:"room_id"`
-	ParticipantID 	string 			`json:"participant_id"`
-	StreamID		string			`json:"stream_id"`
-	RecordingURL 	string 			`json:"recording_url"`
-	Duration 		int64			`json:"duration_secs"`
-	EndedAt 		time.Time 		`json:"ended_at"`
+	EventID 		string 			`json:"eventId"`
+	RoomID			string			`json:"roomId"`
+	ParticipantID 	string 			`json:"participantId"`
+	StreamID		string			`json:"streamId"`
+	RecordingURL 	string 			`json:"recordingUrl"`
+	Duration 		int64			`json:"durationSecs"`
+	EndedAt 		time.Time 		`json:"endedAt"`
 }
 
 
 type RoomClosedEvent struct {
-	EventID 		string 			`json:"event_id"`
-	RoomID 			string 			`json:"room_id"`
-	ExamID 			string 			`json:"exam_id"`
-	ClosedAt 		time.Time 		`json:"closed_at"`
+	EventID 		string 			`json:"eventId"`
+	RoomID 			string 			`json:"roomId"`
+	ExamID 			string 			`json:"examId"`
+	ClosedAt 		time.Time 		`json:"closedAt"`
 	Reason 			string 			`json:"reason"`
 }
+
+
+type ParticipantEvent struct {
+	Type 		string 			`json:"type"`
+	ParticipantID string 		`json:"participantId"`
+	StreamID 	string			`json:"streamId"`
+	StreamType 	string 			`json:"streamType"`
+	At 			time.Time		`json:"at"`
+}
+
+const (
+	ParticipantJoined = "joined"
+	ParticipantLeft = "left"
+)
 
 
 type EventPublisher interface {

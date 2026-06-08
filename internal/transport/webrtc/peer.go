@@ -197,7 +197,15 @@ func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
 }
 
 func (p *Peer) handleAudioTrack(track *webrtc.TrackRemote) {
-
+	p.logger.Info("audio track drain started", 
+		zap.String("codec", track.Codec().MimeType), 
+	)
+	buf := make([]byte, 4096)
+	for {
+		if _, _, err := track.Read(buf); err != nil {
+			return
+		}
+	}
 }
 
 func (p *Peer) HandleOffer(sdp string) (string, error) {

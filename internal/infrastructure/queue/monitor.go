@@ -57,7 +57,7 @@ var (
 		Name:      "write_duration_seconds",
 		Help:      "Time taken to write a message to DLQ",
 		Buckets:   []float64{0.01, 0.05, 0.1, 0.5, 1, 5},
-	}, []string{"topic"})
+	}, []string{"topic", "group_id", "reason"})
 )
 
 type AlertConfig struct {
@@ -172,8 +172,6 @@ func (m *Monitor) processStats(stats kafka.ReaderStats) {
 	groupID := m.groupID
 
 	metricConsumerLag.WithLabelValues(topic, groupID).Set(float64(stats.Lag))
-	metricMessagesProcessed.WithLabelValues(topic, groupID).Add(float64(stats.Messages))
-	metricFetchErrors.WithLabelValues(topic, groupID).Add(float64(stats.Errors))
 
 	m.logger.Debug("kafka consumer stats",
 		zap.String("topic", topic),

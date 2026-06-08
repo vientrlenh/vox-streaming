@@ -2,11 +2,13 @@ package queue
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl/scram"
 	"go.uber.org/zap"
 )
 
@@ -32,6 +34,14 @@ type ConsumerOptions struct {
 }
 
 func NewConsumer(cfg Config, topic string, handler HandlerFunc, logger *zap.Logger, opts *ConsumerOptions) *Consumer {
+	var dialer *kafka.Dialer
+	if cfg.TLSEnabled || cfg.SASLUser != "" {
+		mechanism, _ := scram.Mechanism(scram.SHA256, cfg.SASLUser, cfg.SASLPass)
+			dialer = &kafka.Dialer{
+				SASLMechanism: mechanism, 
+				TLS: &tls.Config{},
+			}
+	}
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers: cfg.Brokers, 
 		GroupID: cfg.GroupID, 
@@ -54,6 +64,7 @@ func NewConsumer(cfg Config, topic string, handler HandlerFunc, logger *zap.Logg
 				zap.String("msg", fmt.Sprintf(msg, args...)),
 			)
 		}),
+		Dialer: dialer,
 	})
 
 	maxRetries := 3

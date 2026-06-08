@@ -26,7 +26,7 @@ type Handler struct {
 	upgrader  websocket.Upgrader
 	logger    *zap.Logger
 	validator *auth.Validator
-	broadcaster *RoomBroadcaster
+	broadcaster *RedisBroadcaster
 }
 
 const (
@@ -42,7 +42,7 @@ func NewHandler(
 	allowedOrigins []string,
 	logger *zap.Logger,
 	validator *auth.Validator,
-	broadcaster *RoomBroadcaster,
+	broadcaster *RedisBroadcaster,
 ) *Handler {
 	return &Handler{
 		peerCfg:  peerCfg,
@@ -150,8 +150,7 @@ func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rawConn.Close()
 
-	ch := h.broadcaster.Subscribe(roomID)
-	defer h.broadcaster.Unsubscribe(roomID, ch)
+	ch := h.broadcaster.Subscribe(r.Context(), roomID)
 
 	h.logger.Info("monitor connected", zap.String("room_id", roomID), zap.String("user_id", claims.UserID))
 
