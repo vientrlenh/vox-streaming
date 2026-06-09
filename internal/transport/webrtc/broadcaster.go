@@ -3,6 +3,7 @@ package webrtc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
@@ -123,6 +124,52 @@ func (b *RedisBroadcaster) SubscribeEvents(ctx context.Context, roomID string) <
 			}
 			select {
 			case out<-event:
+			case<-ctx.Done():
+				return
+			default:
+			}
+		}
+	}()
+	return out
+}
+
+func roomAlertsChannel(roomID string) string {
+	return "room:" + roomID + ":alerts"
+}
+
+func (b *RedisBroadcaster) PublishAlertEvent(ctx context.Context, roomID string, alert domain.AlertEvent) error {
+	data, err := json.Marshal(alert)
+	if err != nil {
+		b.logger.Error("alert marshal failed", zap.Error(err))
+		return fmt.Errorf("marshal alert: %w", err)
+	}
+	if err := b.client.Publish(ctx, roomAlertsChannel(roomID), data).Err(); err != nil {
+		b.logger.Warn("alert publish failed", 
+			zap.String("room_id", roomID), 
+			zap.Error(err),
+		)
+		return fmt.Errorf("redis publish: %w", err)
+	}
+	return nil
+}
+
+func (b *RedisBroadcaster) SubscribeAlerts(ctx context.Context, roomID string) <-chan domain.AlertEvent {
+	out := make(chan domain.AlertEvent, 16)
+	go func() {
+		defer close(out)
+		pubsub := b.client.Subscribe(ctx, roomAlertsChannel(roomID))
+		defer pubsub.Close()
+		for {
+			msg, err := pubsub.ReceiveMessage(ctx)
+			if err != nil {
+				return
+			}
+			var alert domain.AlertEvent
+			if err := json.Unmarshal([]byte(msg.Payload), &alert); err != nil {
+				continue
+			}
+			select {
+			case out<-alert:
 			case<-ctx.Done():
 				return
 			default:

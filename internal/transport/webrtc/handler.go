@@ -1,6 +1,8 @@
 package webrtc
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"slices"
 	"sync"
@@ -8,9 +10,11 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
+	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
 	"github.com/vientrlenh/vox-streaming/pkg/auth"
 	"go.uber.org/zap"
+	grpcclient "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
 )
 
 type SignalMessage struct {
@@ -22,11 +26,21 @@ type SignalMessage struct {
 type Handler struct {
 	peerCfg   PeerConfig
 	sessions  *SessionManager
-	useCase   *usecase.StreamUseCase
+	streamUseCase   *usecase.StreamUseCase
+	monitorUseCase 	*usecase.MonitorUseCase
 	upgrader  websocket.Upgrader
 	logger    *zap.Logger
 	validator *auth.Validator
 	broadcaster *RedisBroadcaster
+	examClient *grpcclient.ExamClient
+}
+
+type MonitorMessage struct {
+	Type 	string 			`json:"type"`
+	Streams []usecase.StreamInfo `json:"streams,omitempty"`
+	Frame *FrameNotification `json:"frame,omitempty"`
+	Event *domain.ParticipantEvent `json:"event,omitempty"`
+	Alert *domain.AlertEvent `json:"alert,omitempty"`
 }
 
 const (
@@ -38,16 +52,19 @@ const (
 
 func NewHandler(
 	peerCfg PeerConfig,
-	useCase *usecase.StreamUseCase,
+	streamUseCase *usecase.StreamUseCase,
+	monitorUseCase *usecase.MonitorUseCase,
 	allowedOrigins []string,
 	logger *zap.Logger,
 	validator *auth.Validator,
-	broadcaster *RedisBroadcaster,
+	broadcaster *RedisBroadcaster, 
+	examClient *grpcclient.ExamClient,
 ) *Handler {
 	return &Handler{
 		peerCfg:  peerCfg,
 		sessions: NewSessionManager(),
-		useCase:  useCase,
+		streamUseCase:  streamUseCase,
+		monitorUseCase: monitorUseCase,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  8192,
 			WriteBufferSize: 8192,
@@ -59,6 +76,7 @@ func NewHandler(
 		logger:    logger,
 		validator: validator,
 		broadcaster: broadcaster,
+		examClient: examClient,
 	}
 }
 
@@ -83,6 +101,23 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.examClient != nil {
+		allowed, reason, err := h.examClient.ValidateAccess(r.Context(), roomID, claims.UserID, streamType)
+		if err != nil {
+			h.logger.Warn("exam validation unavaiable, denying", zap.Error(err))
+			http.Error(w, "exam service unavaiable", http.StatusServiceUnavailable)
+			return
+		}
+		if !allowed {
+			h.logger.Warn("exam access denined", 
+				zap.String("reason", reason), 
+				zap.String("participant_id", claims.UserID),
+			)
+			http.Error(w, reason, http.StatusForbidden)
+			return
+		}
+	}
+
 	rawConn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.logger.Error("websocket upgrade failed", zap.Error(err))
@@ -93,7 +128,7 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rawConn.Close()
 
-	peer, err := NewPeer(h.peerCfg, roomID, claims.UserID, streamType, h.useCase, h.logger)
+	peer, err := NewPeer(h.peerCfg, roomID, claims.UserID, streamType, h.streamUseCase, h.monitorUseCase, h.logger)
 	if err != nil {
 		h.logger.Error("peer creation failed", zap.Error(err))
 		_ = rawConn.WriteJSON(map[string]string{
@@ -150,16 +185,112 @@ func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rawConn.Close()
 
-	ch := h.broadcaster.Subscribe(r.Context(), roomID)
+	// context riêng để cancel cả 2 subscription khi monitor disconnect
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	conn := &safeConn{conn: rawConn}
 
 	h.logger.Info("monitor connected", zap.String("room_id", roomID), zap.String("user_id", claims.UserID))
 
-	for notif := range ch {
-		rawConn.SetWriteDeadline(time.Now().Add(writeDeadline))
-		if err := rawConn.WriteJSON(notif); err != nil {
+	// gửi snapshot ngay khi kết nối - monitor thấy ngay khi ai đó đang online
+	snapshot, err := h.monitorUseCase.GetRoomSnapshot(ctx, roomID)
+	if err != nil {
+		h.logger.Error("get room snapshot failed", zap.String("room_id", roomID), zap.Error(err))
+	}
+	_ = conn.WriteJSON(MonitorMessage{
+		Type: "snapshot", 
+		Streams: snapshot,
+	})
+
+	frameCh := h.broadcaster.Subscribe(ctx, roomID)
+	eventCh := h.monitorUseCase.SubscribeEvents(ctx, roomID)
+	alertCh := h.monitorUseCase.SubscribeAlerts(ctx, roomID)
+
+	// Read goroutine dùng để detect disconnect
+	go func() {
+		defer cancel()
+		rawConn.SetReadLimit(maxMsgSize)
+		rawConn.SetReadDeadline(time.Now().Add(pongWait))
+		rawConn.SetPongHandler(func(string) error {
+			rawConn.SetReadDeadline(time.Now().Add(pongWait))
+			return nil
+		})
+		for {
+			if _, _, err := rawConn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	
+	// ping goroutine
+	go func() {
+		defer cancel()
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case<-ticker.C:
+				conn.mu.Lock()
+				conn.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
+				err := conn.conn.WriteMessage(websocket.PingMessage, nil)
+				conn.mu.Unlock()
+				if err != nil {
+					return
+				}
+			case<-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// write loop, dùng cho merge frame và participant events
+	for {
+		select {
+		case<-ctx.Done():
 			return
+		case notif, ok := <-frameCh:
+			if !ok {
+				return
+			}
+			if err := conn.WriteJSON(MonitorMessage{Type: "frame", Frame: &notif}); err != nil {
+				return
+			}
+		case event, ok := <-eventCh:
+			if !ok {
+				return
+			}
+			if err := conn.WriteJSON(MonitorMessage{Type: "participant", Event: &event}); err != nil {
+				return
+			}
+		case alert, ok := <-alertCh:
+			if !ok {
+				return
+			}
+			if err := conn.WriteJSON(MonitorMessage{Type: "alert", Alert: &alert}); err != nil {
+				return
+			}
 		}
 	}
+}
+
+func (h *Handler) GetActiveRooms(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	claims, err := h.validator.Validate(token)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	rooms, err := h.monitorUseCase.GetActiveRooms(r.Context(), claims.RoomIDs)
+	if err != nil {
+		h.logger.Error("get active rooms failed", zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(rooms)
 }
 
 func (h *Handler) runSignaling(conn *safeConn, peer *Peer) {

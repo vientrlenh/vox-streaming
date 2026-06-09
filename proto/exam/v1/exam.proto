@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package exam.v1;
+
+option go_package = "pkg/pb/exam/v1;examv1";
+
+service ExamService {
+    rpc ValidateAccess(ValidateAccessRequest) returns (ValidateAccessResponse);
+}
+
+message ValidateAccessRequest {
+    string room_id = 1;
+    string participant_id = 2;
+    string stream_type = 3;
+}
+
+message ValidateAccessResponse {
+    bool allowed = 1;
+    string reason = 2;
+}

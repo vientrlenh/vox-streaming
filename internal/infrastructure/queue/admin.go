@@ -2,11 +2,14 @@ package queue
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl/scram"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"go.uber.org/zap"
 )
@@ -48,11 +51,13 @@ var RequiredTopics = []TopicSpec{
 	},
 }
 
-func EnsureTopics(ctx context.Context, brokers []string, logger *zap.Logger) error {
+func EnsureTopics(ctx context.Context, cfg Config, brokers []string, logger *zap.Logger) error {
 	if len(brokers) == 0 {
 		return fmt.Errorf("broker is empty")
 	}
-	conn, err := kafka.DialContext(ctx, "tcp", brokers[0])
+
+	dialer := dialer(cfg)
+	conn, err := dialer.DialContext(ctx, "tcp", brokers[0])
 	if err != nil {
 		return fmt.Errorf("kafka admin connect: %w", err)
 	}
@@ -63,7 +68,7 @@ func EnsureTopics(ctx context.Context, brokers []string, logger *zap.Logger) err
 		return fmt.Errorf("kafka get controller: %w", err)
 	}
 
-	controllerCon, err := kafka.DialContext(ctx,
+	controllerCon, err := dialer.DialContext(ctx,
 		"tcp",
 		net.JoinHostPort(controller.Host, fmt.Sprint(controller.Port)),
 	)
@@ -92,7 +97,9 @@ func EnsureTopics(ctx context.Context, brokers []string, logger *zap.Logger) err
 	}
 
 	if err := controllerCon.CreateTopics(topicConfigs...); err != nil {
-		return fmt.Errorf("kafka create topics: %w", err)
+		if !isTopicExistsError(err) {
+			return fmt.Errorf("kafka create topics: %w", err)
+		}
 	}
 
 	for _, spec := range RequiredTopics {
@@ -104,7 +111,7 @@ func EnsureTopics(ctx context.Context, brokers []string, logger *zap.Logger) err
 	return nil
 }
 
-func WaitForKafka(ctx context.Context, brokers []string, logger *zap.Logger) error {
+func WaitForKafka(ctx context.Context, cfg Config, brokers []string, logger *zap.Logger) error {
 	if len(brokers) == 0 {
 		return fmt.Errorf("broker is empty")
 	}
@@ -117,7 +124,8 @@ func WaitForKafka(ctx context.Context, brokers []string, logger *zap.Logger) err
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			conn, err := kafka.DialContext(ctx, "tcp", brokers[0])
+			dialer := dialer(cfg)
+			conn, err := dialer.DialContext(ctx, "tcp", brokers[0])
 			if err != nil {
 				logger.Warn("kafka not ready, retrying...", zap.Error(err))
 				continue
@@ -127,4 +135,21 @@ func WaitForKafka(ctx context.Context, brokers []string, logger *zap.Logger) err
 			return nil
 		}
 	}
+}
+
+
+func isTopicExistsError(err error) bool {
+	return strings.Contains(err.Error(), "Topic with this name already exists")
+}
+
+func dialer(cfg Config) *kafka.Dialer {
+	dialer := &kafka.Dialer{}
+	if cfg.TLSEnabled || cfg.SASLUser != "" {
+		mechanism, _ := scram.Mechanism(scram.SHA256, cfg.SASLUser, cfg.SASLPass)
+		dialer = &kafka.Dialer{
+			SASLMechanism: mechanism, 
+			TLS: &tls.Config{},
+		}
+	}
+	return dialer
 }

@@ -1,0 +1,54 @@
+package server
+
+import (
+	"context"
+	"time"
+
+	"github.com/vientrlenh/vox-streaming/internal/usecase"
+	alertv1 "github.com/vientrlenh/vox-streaming/pkg/pb/alert/v1"
+	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+type AlertServer struct {
+	alertv1.UnimplementedAlertServiceServer
+	monitorUseCase *usecase.MonitorUseCase
+	logger         *zap.Logger
+}
+
+func NewAlertServer(mu *usecase.MonitorUseCase, logger *zap.Logger) *AlertServer {
+	return &AlertServer{
+		monitorUseCase: mu,
+		logger:         logger,
+	}
+}
+
+func (s *AlertServer) PushAlert(ctx context.Context, req *alertv1.PushAlertRequest) (*alertv1.PushAlertResponse, error) {
+	if req.RoomId == "" || req.ParticipantId == "" || req.AlertType == "" {
+		return nil, status.Error(codes.InvalidArgument, "room_id, participant_id, alert_type are required")
+	}
+
+	capturedAt := time.Now().UTC()
+	if req.CapturedAtMs > 0 {
+		capturedAt = time.UnixMilli(req.CapturedAtMs).UTC()
+	}
+	if err := s.monitorUseCase.PublishAlert(ctx, req.RoomId, req.ParticipantId, req.StreamId, req.AlertType, float64(req.Confidence), capturedAt); err != nil {
+		s.logger.Error("publish alert failed", 
+			zap.String("room_id", req.RoomId), 
+			zap.String("alert_type", req.AlertType), 
+			zap.Error(err),
+		)
+		return nil, status.Error(codes.Unavailable, "alert service temporary unavailable")
+	}
+
+	s.logger.Info("ai alert published", 
+		zap.String("room_id", req.RoomId), 
+		zap.String("participant_id", req.ParticipantId), 
+		zap.String("alert_type", req.AlertType), 
+		zap.Float32("confidence", req.Confidence),
+	)
+
+
+	return &alertv1.PushAlertResponse{Received: true}, nil
+}

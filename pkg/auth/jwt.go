@@ -32,7 +32,7 @@ func (c *StreamClaims) CanStream(streamType string) bool {
 }
 
 func (c *StreamClaims) CanMonitorRoom(roomID string) bool {
-	if !c.hasMonitorRole() {
+	if !c.HasMonitorRole() {
 		return false
 	}
 	return slices.Contains(c.RoomIDs, roomID)
@@ -42,7 +42,7 @@ func (c *StreamClaims) IsStudent() bool {
 	return c.hasRole(RoleStudent)
 }
 
-func (c *StreamClaims) hasMonitorRole() bool {
+func (c *StreamClaims) HasMonitorRole() bool {
 	return c.hasRole(RoleTeacher) || c.hasRole(RoleSchoolAdmin)
 }
 

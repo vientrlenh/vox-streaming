@@ -13,11 +13,14 @@ import (
 	"time"
 
 	pwebrtc "github.com/pion/webrtc/v4"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/segmentio/kafka-go"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/queue"
+	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
+	grpcclient "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
+	grpctransport "github.com/vientrlenh/vox-streaming/internal/transport/grpc/server"
+	httpRoute "github.com/vientrlenh/vox-streaming/internal/transport/http"
 	webrtctransport "github.com/vientrlenh/vox-streaming/internal/transport/webrtc"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
 	"github.com/vientrlenh/vox-streaming/pkg/auth"
@@ -51,11 +54,11 @@ func main() {
 	startupCtx, startupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer startupCancel()
 
-	if err := queue.WaitForKafka(startupCtx, kafkaCfg.Brokers, logger); err != nil {
+	if err := queue.WaitForKafka(startupCtx, kafkaCfg, kafkaCfg.Brokers, logger); err != nil {
 		logger.Fatal("kafka unavailable", zap.Error(err))
 	}
 
-	if err := queue.EnsureTopics(startupCtx, kafkaCfg.Brokers, logger); err != nil {
+	if err := queue.EnsureTopics(startupCtx, kafkaCfg, kafkaCfg.Brokers, logger); err != nil {
 		logger.Fatal("ensure topics failed", zap.Error(err))
 	}
 
@@ -63,9 +66,6 @@ func main() {
 	if err != nil {
 		logger.Fatal("publisher init failed", zap.Error(err))
 	}
-
-
-	streamUseCase := usecase.NewStreamUseCase(publisher, logger)
 	
 	iceServers := buildICEServers()
 	frameIntervalSecs, _ := strconv.Atoi(os.Getenv("FRAME_INTERVAL_SECS"))
@@ -90,9 +90,43 @@ func main() {
 
 	sessionRegistry := cache.NewSessionRegistry(redisClient)
 	broadCaster := webrtctransport.NewRedisBroadcaster(redisClient, logger)
-	monitorUseCase := usecase.NewMonitorUseCase(sessionRegistry, broadCaster, logger)
 
+	streamUseCase := usecase.NewStreamUseCase(publisher, sessionRegistry, logger)
+	monitorUseCase := usecase.NewMonitorUseCase(sessionRegistry, broadCaster, broadCaster, logger)
 
+	alertServer := grpctransport.NewAlertServer(monitorUseCase, logger)
+
+	grpcAddr := os.Getenv("GRPC_ADDR")
+	if grpcAddr == "" {
+		grpcAddr = ":9091"
+	}
+
+	grpcServer, err := grpctransport.NewServer(grpctransport.ServerConfig{
+		Addr: grpcAddr,
+		CertFile: os.Getenv("GRPC_CERT_FILE"),
+		KeyFile: os.Getenv("GRPC_KEY_FILE"),
+		CAFile: os.Getenv("GRPC_CA_FILE"),
+		APIKey: os.Getenv("GRPC_SERVICE_TOKEN"),
+	}, alertServer, logger)
+	if err != nil {
+		logger.Fatal("grpc server create failed", zap.Error(err))
+	}
+
+	examClient, err := grpcclient.NewExamClient(grpcclient.ExamClientConfig{
+		Addr: os.Getenv("EXAM_SERVICE_GRPC_ADDR"),
+		CAFile: os.Getenv("EXAM_SERVICE_CA_FILE"),
+		Token: os.Getenv("GRPC_SERVICE_TOKEN"),
+	}, logger)
+	if err != nil {
+		logger.Fatal("grpc exam client create failed", zap.Error(err))
+	}
+
+	go func() {
+		logger.Info("grpc server started", zap.String("addr", grpcAddr))
+		if err := grpcServer.Serve(); err != nil {
+			logger.Error("grpc server error", zap.Error(err))
+		}
+	}()
 
 	webrtcHandler := webrtctransport.NewHandler(
 		webrtctransport.PeerConfig{
@@ -100,23 +134,25 @@ func main() {
 			FrameInterval: time.Duration(frameIntervalSecs) * time.Second, 
 		},
 		streamUseCase, 
+		monitorUseCase,
 		allowedOrigins,
 		logger,
 		jwtValidator,
 		broadCaster,
+		examClient,
 	)
 
-	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/ws/stream", webrtcHandler.ServeStream)
-		mux.HandleFunc("/ws/monitor", webrtcHandler.ServeMonitor)
+	addr := os.Getenv("WEBRTC_ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+	mux := http.NewServeMux()
+	srv := &http.Server{Addr: addr, Handler: mux}
 
-		addr := os.Getenv("WEBRTC_ADDR")
-		if addr == "" {
-			addr = ":8080"
-		}
+	go func() {
+		httpRoute.Register(mux, webrtcHandler)
 		logger.Info("webrtc signaling server started", zap.String("addr", addr))
-		if err := http.ListenAndServe(addr, mux); err != nil {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("webrtc server error", zap.Error(err))
 		}
 	}()
@@ -153,23 +189,40 @@ func main() {
 			MaxRetries: 3, 
 			RetryDelay: 500 * time.Millisecond, 
 			DLQ: dlqWriter,
+			CommitOnDLQFailure: true, // frame mất không bị ảnh hưởng
+			MaxDLQFails: 0,
 		},
 	)
 
+	streamStartedConsumer := queue.NewConsumer(
+		kafkaCfg, 
+		domain.TopicStreamStarted, 
+		handleStreamStarted(logger, monitorUseCase), 
+		logger, 
+		&queue.ConsumerOptions{
+			MaxRetries: 5, 
+			RetryDelay: time.Second,
+			DLQ: dlqWriter,
+			CommitOnDLQFailure: false,
+			MaxDLQFails: 10,
+		},
+	)
 	streamEndedConsumer := queue.NewConsumer(
 		kafkaCfg, 
 		domain.TopicStreamEnded, 
-		handleStreamEnded(logger),
+		handleStreamEnded(logger, monitorUseCase),
 		logger, 
 		&queue.ConsumerOptions{
 			MaxRetries: 5, 
 			RetryDelay: time.Second, 
-			DLQ: dlqWriter,
+			DLQ: dlqWriter, 
+			CommitOnDLQFailure: false,
+			MaxDLQFails: 10,
 		},
 	)
 
 	monitor := queue.NewMonitor(
-		[]*queue.Consumer{ frameConsumer, streamEndedConsumer },
+		[]*queue.Consumer{ frameConsumer, streamStartedConsumer, streamEndedConsumer },
 		dlqWriter, 
 		queue.DefaultAlertConfigs, 
 		alertFn, 
@@ -178,6 +231,7 @@ func main() {
 	)
 
 	frameConsumer.SetMonitor(monitor)
+	streamStartedConsumer.SetMonitor(monitor)
 	streamEndedConsumer.SetMonitor(monitor)
 
 	runCtx, runCancel := context.WithCancel(context.Background())
@@ -190,6 +244,12 @@ func main() {
 	}()
 
 	go func() {
+		if err := streamStartedConsumer.Run(runCtx); err != nil {
+			logger.Error("stream started consumer error", zap.Error(err))
+		}
+	}()
+
+	go func() {
 		if err := streamEndedConsumer.Run(runCtx); err != nil {
 			logger.Error("stream ended consumer error", zap.Error(err))
 		}
@@ -198,17 +258,11 @@ func main() {
 	go monitor.Run(runCtx)
 
 	go func() {
-		mux := http.NewServeMux()
-		mux.Handle("/metrics", promhttp.Handler())
-		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		})
-		logger.Info("metric server started", zap.String("addr", ":9090"))
-		if err := http.ListenAndServe(":9090", mux); err != nil {
-			logger.Error("metrics server error", zap.Error(err))
-		}
+		httpRoute.RunMetric(logger)
 	}()
 
+	ensureStorage(startupCtx, logger)
+	
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 	sig := <-quit
@@ -222,9 +276,12 @@ func main() {
 	done := make(chan struct{})
 	go func() {
 		frameConsumer.Close()
+		streamStartedConsumer.Close()
 		streamEndedConsumer.Close()
 		publisher.Close()
 		dlqWriter.Close()
+		grpcServer.Shutdown()
+		srv.Shutdown(shutdownCtx)
 		close(done)
 	}()
 
@@ -252,7 +309,7 @@ func handleFrameReady(logger *zap.Logger, bc *webrtctransport.RedisBroadcaster) 
 			FrameURL: event.FrameURL,
 			SequenceNo: event.SequenceNo,
 		})
-		logger.Info("processing frame event", 
+		logger.Debug("processing frame event", 
 			zap.String("stream_id", event.StreamID), 
 			zap.String("room_Id", event.RoomID), 
 			zap.Int64("seq", event.SequenceNo),
@@ -263,7 +320,26 @@ func handleFrameReady(logger *zap.Logger, bc *webrtctransport.RedisBroadcaster) 
 	}
 }
 
-func handleStreamEnded(logger *zap.Logger) queue.HandlerFunc {
+func handleStreamStarted(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.HandlerFunc {
+	return func(ctx context.Context, msg kafka.Message) error {
+		var event domain.StreamStartedEvent
+		if err := json.Unmarshal(msg.Value, &event); err != nil {
+			return fmt.Errorf("unmarshal stream started: %w", err)
+		}
+		logger.Info(
+			"stream started", 
+			zap.String("stream_id", event.StreamID), 
+			zap.String("room_id", event.RoomID),
+			zap.String("stream_type", event.StreamType),
+		)
+
+		mu.NotifyJoined(ctx, event.RoomID, event.ParticipantID, event.StreamID, event.StreamType)
+
+		return nil
+	}
+}
+
+func handleStreamEnded(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.HandlerFunc {
 	return func(ctx context.Context, msg kafka.Message) error {
 		var event domain.StreamEndedEvent
 
@@ -276,6 +352,8 @@ func handleStreamEnded(logger *zap.Logger) queue.HandlerFunc {
 			zap.String("recording_url", event.RecordingURL), 
 			zap.Int64("duration_secs", event.Duration),
 		)
+
+		mu.NotifyLeft(ctx, event.RoomID, event.ParticipantID, event.StreamID, event.StreamType)
 
 		// notify qua Spring Boot bằng GRPC để cập nhật dữ liệu trạng thái vào DB
 		// ...
@@ -316,10 +394,37 @@ func parseAllowedOrigins() []string {
 		return []string{"http://localhost:5173"}
 	}
 	var origins []string 
-	for _, o := range strings.Split(raw, ",") {
+	for o := range strings.SplitSeq(raw, ",") {
 		if o = strings.TrimSpace(o); o != "" {
 			origins = append(origins, o)
 		}
 	}
 	return origins
+}
+
+func ensureStorage(startupCtx context.Context, logger *zap.Logger) {
+	storageEndpoint := os.Getenv("STORAGE_ENDPOINT")
+	if storageEndpoint == "" {
+		storageEndpoint = "localhost:9000"
+	}
+
+	storageCfg := storage.DefaultConfig(
+		storageEndpoint, 
+		os.Getenv("STORAGE_ACCESS_KEY"),
+		os.Getenv("STORAGE_SECRET_KEY"),
+	)
+	storageCfg.UseSSL = os.Getenv("STORAGE_USE_SSL") == "true"
+	if presignMins := os.Getenv("STORAGE_PRESIGN_MINUTES"); presignMins != "" {
+		if m, err := strconv.Atoi(presignMins); err == nil {
+			storageCfg.PresignExpiry = time.Duration(m) * time.Minute
+		}
+	}
+	storageClient, err := storage.NewClient(storageCfg, logger)
+	if err != nil {
+		logger.Fatal("storage init failed", zap.Error(err))
+	}
+	if err := storageClient.EnsureBuckets(startupCtx); err != nil {
+		logger.Fatal("ensure bucket failed", zap.Error(err))
+	}
+
 }

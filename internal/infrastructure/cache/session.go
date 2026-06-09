@@ -110,3 +110,8 @@ func (r *SessionRegistry) scanByPattern(ctx context.Context, pattern string) ([]
 	}
 	return infos, nil
 }
+
+
+func (r *SessionRegistry) Refresh(ctx context.Context, roomID, participantID, streamType string) error {
+	return r.client.Expire(ctx, sessionKey(roomID, participantID, streamType), sessionTTL).Err()
+}

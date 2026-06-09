@@ -33,17 +33,24 @@ type ParticipantEventer interface {
 	SubscribeEvents(ctx context.Context, roomID string) <-chan domain.ParticipantEvent
 }
 
+type AlertEventer interface {
+	PublishAlertEvent(ctx context.Context, roomID string, alert domain.AlertEvent) error
+	SubscribeAlerts(ctx context.Context, roomID string) <-chan domain.AlertEvent
+}
+
 type MonitorUseCase struct {
 	scanner SessionScanner
-	eventer ParticipantEventer
+	participantEventer ParticipantEventer
+	alertEventer AlertEventer
 	logger *zap.Logger
 }
 
 
-func NewMonitorUseCase(scanner SessionScanner, eventer ParticipantEventer, logger *zap.Logger) *MonitorUseCase {
+func NewMonitorUseCase(scanner SessionScanner, participantEventer ParticipantEventer, alertEventer AlertEventer, logger *zap.Logger) *MonitorUseCase {
 	return &MonitorUseCase{
 		scanner: scanner, 
-		eventer: eventer,
+		participantEventer: participantEventer,
+		alertEventer: alertEventer,
 		logger: logger,
 	}
 }
@@ -63,28 +70,54 @@ func (u *MonitorUseCase) GetRoomSnapshot(ctx context.Context, roomID string) ([]
 			StartedAt: s.StartedAt,
 		})
 	}
-	u.logger.Debug("room snapshot detected", zap.String("room_id", roomID), zap.Int("active_streams", len(infos)))
+	u.logger.Debug("room snapshot detected", 
+		zap.String("room_id", roomID), 
+		zap.Int("active_streams", 
+		len(infos)),
+	)
 	return infos, nil
 }
 
 
 // trả về tất cả phòng đang có stream - dành cho school admin
-func (u *MonitorUseCase) GetActiveRooms(ctx context.Context) ([]RoomSummary, error) {
+func (u *MonitorUseCase) GetActiveRooms(ctx context.Context, allowedRoomIDs []string) ([]RoomSummary, error) {
 	all, err := u.scanner.ScanAll(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get active rooms:%w", err)
 	}
-	byRoom := make(map[string]*RoomSummary)
-	for _, s := range all {
-		rs, ok := byRoom[s.ParticipantID]
-		_ = rs
-		_ = ok
+	allowed := make(map[string]bool, len(allowedRoomIDs))
+	for _, id := range allowedRoomIDs {
+		allowed[id] = true
 	}
-	return nil, nil
+	roomSession := make(map[string][]StreamInfo)
+	for _, s := range all {
+		if !allowed[s.RoomID] {
+			continue
+		}
+		roomSession[s.RoomID] = append(roomSession[s.RoomID], StreamInfo{
+			StreamID: s.StreamID, 
+			ParticipantID: s.ParticipantID, 
+			StreamType: s.StreamType, 
+			StartedAt: s.StartedAt,
+		})
+	}
+	result := make([]RoomSummary, 0, len(roomSession))
+	for k, v := range roomSession {
+		result = append(result, RoomSummary{
+			RoomID: k,
+			ActiveCount: len(v),
+			Streams: v,
+		})
+	}
+	u.logger.Debug("active room fetched", 
+		zap.Int("allowed_rooms", len(allowedRoomIDs)), 
+		zap.Int("active_rooms", len(result)),
+	)
+	return result, nil
 }
 
 func (u *MonitorUseCase) NotifyJoined(ctx context.Context, roomID, participantID, streamID, streamType string) {
-	u.eventer.PublishParticipantEvent(ctx, roomID, domain.ParticipantEvent{
+	u.participantEventer.PublishParticipantEvent(ctx, roomID, domain.ParticipantEvent{
 		Type: domain.ParticipantJoined, 
 		ParticipantID: participantID, 
 		StreamID: streamID, 
@@ -94,11 +127,32 @@ func (u *MonitorUseCase) NotifyJoined(ctx context.Context, roomID, participantID
 }
 
 func (u *MonitorUseCase) NotifyLeft(ctx context.Context, roomID, participantID, streamID, streamType string) {
-	u.eventer.PublishParticipantEvent(ctx, roomID, domain.ParticipantEvent{
+	u.participantEventer.PublishParticipantEvent(ctx, roomID, domain.ParticipantEvent{
 		Type: domain.ParticipantLeft, 
 		ParticipantID: participantID, 
 		StreamID: streamID, 
 		StreamType: streamType,
 		At: time.Now().UTC(),
 	})
+}
+
+func (u *MonitorUseCase) SubscribeEvents(ctx context.Context, roomID string) <-chan domain.ParticipantEvent {
+	return u.participantEventer.SubscribeEvents(ctx, roomID)
+}
+
+
+func (u *MonitorUseCase) PublishAlert(ctx context.Context, roomID, participantID, streamID, alertType string, confidence float64, capturedAt time.Time) error {
+	return u.alertEventer.PublishAlertEvent(ctx, roomID, domain.AlertEvent{
+		RoomID: roomID, 
+		ParticipantID: participantID, 
+		StreamID: streamID, 
+		AlertType: alertType, 
+		Confidence: confidence, 
+		CapturedAt: capturedAt,
+	})
+}
+
+
+func (u *MonitorUseCase) SubscribeAlerts(ctx context.Context, roomID string) <-chan domain.AlertEvent {
+	return u.alertEventer.SubscribeAlerts(ctx, roomID)
 }

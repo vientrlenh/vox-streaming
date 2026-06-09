@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package alert.v1;
+
+option go_package = "pkg/pb/alert/v1;alertv1";
+
+service AlertService {
+	rpc PushAlert(PushAlertRequest) returns (PushAlertResponse);
+}
+
+message PushAlertRequest {
+	string room_id = 1;
+	string participant_id = 2;
+	string stream_id = 3;
+	string alert_type = 4;
+	float confidence = 5;
+	int64 captured_at_ms = 6;
+}
+
+message PushAlertResponse {
+	bool received = 1;
+}

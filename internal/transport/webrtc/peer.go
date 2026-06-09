@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pion/webrtc/v4"
+	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
 	"go.uber.org/zap"
 )
@@ -41,8 +42,11 @@ type Peer struct {
 	disconnectTimer *time.Timer
 	disconnectMu    sync.Mutex
 
-	useCase *usecase.StreamUseCase
+	streamUseCase *usecase.StreamUseCase
+	monitorUseCase *usecase.MonitorUseCase
 	logger  *zap.Logger
+
+	closedByFailure atomic.Bool
 
 	done      chan struct{}
 	once      sync.Once
@@ -52,7 +56,8 @@ type Peer struct {
 func NewPeer(
 	cfg PeerConfig,
 	roomID, participantID, streamType string,
-	useCase *usecase.StreamUseCase,
+	streamUseCase *usecase.StreamUseCase, 
+	monitorUseCase *usecase.MonitorUseCase,
 	logger *zap.Logger,
 ) (*Peer, error) {
 	me := &webrtc.MediaEngine{}
@@ -87,7 +92,8 @@ func NewPeer(
 		streamType:    streamType,
 		startedAt:     time.Now().UTC(),
 		frameInterval: fi,
-		useCase:       useCase,
+		streamUseCase: streamUseCase,
+		monitorUseCase: monitorUseCase,
 		done:          make(chan struct{}),
 		logger: logger.With(
 			zap.String("room_id", roomID),
@@ -96,6 +102,7 @@ func NewPeer(
 			zap.String("stream_type", streamType),
 		),
 	}
+	p.closedByFailure.Store(false)
 	p.setupCallbacks()
 	return p, nil
 }
@@ -108,7 +115,7 @@ func (p *Peer) setupCallbacks() {
 			p.cancelDisconnectTimer()
 			p.startOnce.Do(func() {
 				ctx := context.Background()
-				if err := p.useCase.NotifyStreamStarted(
+				if err := p.streamUseCase.NotifyStreamStarted(
 					ctx, p.roomID, p.participantID, p.streamID, p.streamType,
 				); err != nil {
 					p.logger.Error("notify stream started failed", zap.Error(err))
@@ -120,6 +127,7 @@ func (p *Peer) setupCallbacks() {
 
 		case webrtc.PeerConnectionStateFailed:
 			p.logger.Error("peer connection failed, closing")
+			p.closedByFailure.Store(true)
 			p.close()
 
 		case webrtc.PeerConnectionStateClosed:
@@ -151,6 +159,7 @@ func (p *Peer) scheduleClose(d time.Duration) {
 	}
 	p.disconnectTimer = time.AfterFunc(d, func() {
 		p.logger.Warn("grace period expired, closing peer")
+		p.closedByFailure.Store(true)
 		p.close()
 	})
 }
@@ -181,7 +190,7 @@ func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
 			case <-ticker.C:
 				seq := p.frameSeq.Add(1)
 				frameURL := ""
-				if err := p.useCase.PublishFrame(ctx, p.roomID, p.participantID, p.streamID, p.streamType, frameURL, seq); err != nil {
+				if err := p.streamUseCase.PublishFrame(ctx, p.roomID, p.participantID, p.streamID, p.streamType, frameURL, seq); err != nil {
 					p.logger.Warn("publish frame failed", zap.Int64("seq", seq), zap.Error(err))
 				}
 			}
@@ -261,12 +270,26 @@ func (p *Peer) close() {
 		close(p.done)
 		duration := int64(time.Since(p.startedAt).Seconds())
 		ctx := context.Background()
-		if err := p.useCase.NotifyStreamEnded(
-			ctx, p.roomID, p.participantID, p.streamID, "", duration,
+		if p.closedByFailure.Load() {
+			if err := p.monitorUseCase.PublishAlert(ctx, p.roomID, p.participantID, p.streamID, domain.AlertStreamDropped, 1.0, time.Now().UTC()); err != nil {
+				p.logger.Warn("stream dropped alert failed", zap.Error(err)) // stream tiếp tục chạy, không return
+			}
+		}
+		if err := p.streamUseCase.NotifyStreamEnded(
+			ctx, p.roomID, p.participantID, p.streamID, p.streamType, "", duration,
 		); err != nil {
 			p.logger.Error("notify stream ended failed", zap.Error(err))
 		}
-		_ = p.pc.Close()
-		p.logger.Info("peer closed", zap.Int64("duration_secs", duration))
+		if err := p.pc.Close(); err != nil {
+			p.logger.Error("stream end close failed", 
+				zap.String("stream_id", p.streamID), 
+				zap.String("room_id", p.roomID), 
+				zap.Error(err),
+			)
+		}
+		p.logger.Info("peer closed", 
+			zap.Int64("duration_secs", duration),
+		)
 	})
 }
+
