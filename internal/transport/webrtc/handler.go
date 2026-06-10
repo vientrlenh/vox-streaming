@@ -142,9 +142,16 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.sessions.Add(roomID, claims.UserID, streamType, peer)
+	if old := h.sessions.Replace(roomID, claims.UserID, streamType, peer); old != nil {
+		old.Close() // explicit close, clear ownership
+	}
+	h.logger.Info("replaced existing peer on reconnect", 
+		zap.String("room_id", roomID), 
+		zap.String("participant_id", claims.UserID), 
+		zap.String("stream_type", streamType),
+	)
 	defer func() {
-		h.sessions.Remove(roomID, claims.UserID, streamType)
+		h.sessions.RemoveIfSame(roomID, claims.UserID, streamType, peer)
 		peer.Close()
 	}()
 

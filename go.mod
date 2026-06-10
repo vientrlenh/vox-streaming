@@ -5,6 +5,7 @@ go 1.26.3
 require golang.org/x/sync v0.21.0
 
 require (
+	github.com/Eyevinn/mp4ff v0.52.0 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.42.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.13 // indirect
 	github.com/aws/aws-sdk-go-v2/config v1.32.24 // indirect

@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
+	"syscall"
 
 	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
@@ -21,18 +23,21 @@ type AssemblerUseCase struct {
 	examClient *examgrpc.ExamClient
 	logger *zap.Logger
 	workDir string
+	sem chan struct{}
 }
 
 func NewAssemblerUseCase(storage *storage.Client, examClient *examgrpc.ExamClient, logger *zap.Logger) *AssemblerUseCase {
 	workDir := os.Getenv("ASSEMBLER_WORK_DIR")
 	if workDir == "" {
-		workDir = filepath.Join(os.TempDir(), "vox-assembly")
+		workDir = "/var/tmp/vox-assembly"
 	}
+	maxConcurrent := 3
 	return &AssemblerUseCase{
 		storage: storage, 
 		examClient: examClient, 
 		logger: logger,
 		workDir: workDir,
+		sem: make(chan struct{}, maxConcurrent),
 	}
 }
 
@@ -40,6 +45,12 @@ func (u *AssemblerUseCase) Assemble(ctx context.Context, event domain.StreamEnde
 	if len(event.SegmentKeys) == 0 {
 		u.logger.Debug("no server segments, skipping assembly", zap.String("stream_id", event.StreamID))
 		return nil
+	}
+	select {
+	case u.sem <-struct{}{}:
+		defer func() { <-u.sem }()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 
 	log := u.logger.With(
@@ -63,6 +74,11 @@ func (u *AssemblerUseCase) Assemble(ctx context.Context, event domain.StreamEnde
 		return fmt.Errorf("create job dir: %w", err)
 	}
 	defer os.RemoveAll(jobDir) // cleanup for both fail and success
+
+	estimatedBytes := uint64(len(event.SegmentKeys)) * 20*1024*1024 * 2 // 20MB x 2 for output
+	if err := u.checkDiskSpace(u.workDir, estimatedBytes); err != nil {
+		return fmt.Errorf("pre-flight disk check: %w", err)
+	}
 
 	log.Info("starting assembly")
 
@@ -143,6 +159,18 @@ func (u *AssemblerUseCase) concat(ctx context.Context, concatPath, outputPath st
 	return nil
 }
 
+func (u *AssemblerUseCase) checkDiskSpace(dir string, requiredBytes uint64) error {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(dir, &stat); err != nil {
+		return nil
+	}
+	available := stat.Bavail * uint64(stat.Bsize)
+	if available < requiredBytes {
+		return fmt.Errorf("insufficient disk space: need %dMB, have %dMB", requiredBytes/1024/1024, available/1024/1024)
+	}
+	return nil
+}
+
 func writeConcatList(path string, files []string) error {
 	f, err := os.Create(path)
 	if err != nil {
@@ -150,7 +178,8 @@ func writeConcatList(path string, files []string) error {
 	}
 	defer f.Close()
 	for _, file := range files {
-		fmt.Fprintf(f, "file '%s'\n", file)
+		escaped := strings.ReplaceAll(file, "'", "'\\''")
+		fmt.Fprintf(f, "file '%s'\n", escaped)
 	}
 	return nil
 }

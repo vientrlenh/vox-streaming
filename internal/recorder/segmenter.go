@@ -1,12 +1,9 @@
 package recorder
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"sort"
 	"sync"
 	"time"
@@ -18,213 +15,191 @@ import (
 const defaultSegmentDuration = 30 * time.Second
 
 type SegmentMeta struct {
-	Seq int64
-	S3Key string
+	Seq       int64
+	S3Key     string
 	StartedAt time.Time
-	EndedAt time.Time
+	EndedAt   time.Time
 }
 
-// a short-lived ffmpeg process (30s) + OGG writer for audio
+// write one 30 sec fMp4 segment with no external processes
 type segmentWriter struct {
-	ffmpegCmd *exec.Cmd
-	videoIn io.WriteCloser
-	videoPath string
+	outFile   *os.File
+	outPath   string
 	startedAt time.Time
+	mw        *fMP4Writer
 
-	audioFile *os.File
-	audioPath string
-	oggWriter *OGGWriter
-	hasAudio bool
+	initWritten bool
+	sps, pps    []byte
+
+	// pending GOP buffer - flushed as one fragment on next IDR or rotation
+	gopVideo    []fragSample
+	gopAudio    []fragSample
+	gopVideoDTS uint64
+	gopAudioDTS uint64
+
+	// running DTS counter (updated after each flush)
+	videoDTS uint64
+	audioDTS uint64
 }
 
-func newSegmentWriter(withAudio bool, channels uint8) (*segmentWriter, error) {
-	vf, err := os.CreateTemp("", "vox-segment-video-*.mp4")
+func newSegmentWriter() (*segmentWriter, error) {
+	f, err := os.CreateTemp("", "vox-segment-video-*.mp4")
 	if err != nil {
 		return nil, err
 	}
-	vf.Close()
-	videoPath := vf.Name()
 
-	cmd := exec.Command("ffmpeg", 
-		"-hide_banner", "-loglevel", "error", 
-		"-f", "h264", "-i", "pipe:0", 
-		"-c:v", "copy", 
-		"-movflags", "frag_keyframe+empty_moov", // fragmented MP4 for segment
-		"-y", videoPath,
-	)
-
-	pipe, err := cmd.StdinPipe()
-	if err != nil {
-		os.Remove(videoPath)
-		return nil, err
-	}
-
-	if err := cmd.Start(); err != nil {
-		os.Remove(videoPath)
-		return nil, fmt.Errorf("ffmpeg start: %w", err)
-	}
-
-	sw := &segmentWriter{
-		ffmpegCmd: cmd,
-		videoIn: pipe, 
-		videoPath: videoPath, 
+	return &segmentWriter{
+		outFile:   f,
+		outPath:   f.Name(),
 		startedAt: time.Now().UTC(),
-	}
-	if withAudio {
-		_ = sw.startAudio(channels)
-	}
-	return sw, nil
+		mw:        newFMP4Writer(f),
+	}, nil
 }
 
-func (sw *segmentWriter) startAudio(channels uint8) error {
-	af, err := os.CreateTemp("", "vox-seg-audio-*.ogg")
-	if err != nil {
-		return err
-	}
-	ow, err := NewOGGWriter(af, channels)
-	if err != nil {
-		af.Close()
-		os.Remove(af.Name())
-		return err
-	}
-	sw.audioFile = af
-	sw.audioPath = af.Name()
-	sw.oggWriter = ow
-	sw.hasAudio = true
-	return nil
-}
-
-
-func (sw *segmentWriter) writeVideo(nals [][]byte) error {
-	if sw.videoIn == nil {
-		return nil
-	}
+// buffer a picture into the current GDP
+// On a new IDR, the previous GOP is flushed as one moof+mdat fragment first
+// hasIDR must be true when nals contains an IDR frame (type 5)
+func (sw *segmentWriter) writeVideo(nals [][]byte, hasIDR bool) error {
+	// Extract SPS/PPS whenever they appear (typically in every IDR picture)
 	for _, nal := range nals {
-		if _, err := sw.videoIn.Write(annexBStartCode); err != nil {
-			sw.videoIn = nil // mark dead, stop future writes
-			return err
+		if len(nal) == 0 {
+			continue
 		}
-		if _, err := sw.videoIn.Write(nal); err != nil {
-			sw.videoIn = nil
+		switch nal[0] & 0x1F {
+		case 7:
+			sw.sps = nal
+		case 8:
+			sw.pps = nal
+		}
+	}
+
+	if !sw.initWritten {
+		if hasIDR && len(sw.sps) > 0 && len(sw.pps) > 0 {
+			if err := sw.mw.WriteInit(sw.sps, sw.pps); err != nil {
+				return fmt.Errorf("write init: %w", err)
+			}
+			sw.initWritten = true
+		} else {
+			return nil // wait for first IDR with parameter sets
+		}
+	}
+
+	if hasIDR && len(sw.gopVideo) > 0 {
+		if err := sw.flushGOP(); err != nil {
 			return err
 		}
 	}
+
+	if len(sw.gopVideo) == 0 {
+		sw.gopVideoDTS = sw.videoDTS
+		sw.gopAudioDTS = sw.audioDTS
+	}
+
+	avcc := nalsToAVCC(nals)
+	if len(avcc) == 0 {
+		return nil // picture had only SPS/PPS, nothing to store
+	}
+	sw.gopVideo = append(sw.gopVideo, fragSample{
+		data:  avcc,
+		dur:   defaultFrameDur,
+		isKey: hasIDR,
+	})
 	return nil
 }
 
 func (sw *segmentWriter) writeAudio(payload []byte, sampleCount uint32) {
-	if !sw.hasAudio || sw.oggWriter == nil {
-		return
+	if !sw.initWritten || len(sw.gopVideo) == 0 {
+		return // align audio start with first GOP
 	}
-	if err := sw.oggWriter.WritePacket(payload, sampleCount); err != nil {
-		sw.oggWriter = nil
-	}
+	sw.gopAudio = append(sw.gopAudio, fragSample{
+		data: append([]byte(nil), payload...),
+		dur:  sampleCount, // 48kHz ticks - comes from RTP timestamp diff
+	})
 }
 
-// close ffmpeg and OGG, run mux, return path to the finalized Mp4 file 
-func (sw *segmentWriter) closeAndMux(ctx context.Context, logger *zap.Logger) (string, error) {
-	if sw.videoIn != nil {
-		sw.videoIn.Close()
-		sw.videoIn = nil
+func (sw *segmentWriter) flushGOP() error {
+	if len(sw.gopVideo) == 0 {
+		return nil
 	}
-	if sw.ffmpegCmd != nil && sw.ffmpegCmd.Process != nil {
-		if err := sw.ffmpegCmd.Wait(); err != nil {
-			logger.Warn("segment ffmpeg exited with error", zap.Error(err))
-		}
+	vf := videoFragment{
+		videoSamples:  sw.gopVideo,
+		audioSamples:  sw.gopAudio,
+		videoDTSStart: sw.gopVideoDTS,
+		audioDTSStart: sw.gopAudioDTS,
 	}
-	if sw.oggWriter != nil {
-		sw.oggWriter.Close()
-		sw.oggWriter = nil
+	if err := sw.mw.WriteFragment(vf); err != nil {
+		return fmt.Errorf("write fragment: %w", err)
 	}
-	if sw.audioFile != nil {
-		sw.audioFile.Close()
-		sw.audioFile = nil
+	for _, s := range sw.gopVideo {
+		sw.videoDTS += uint64(s.dur)
 	}
+	for _, s := range sw.gopAudio {
+		sw.audioDTS += uint64(s.dur)
+	}
+	sw.gopVideo = nil
+	sw.gopAudio = nil
+	return nil
+}
 
-	stat, err := os.Stat(sw.videoPath)
-	if err != nil || stat.Size() < 100 {
-		sw.cleanup()
+// flush the last GOP and closes the output file
+// return the path of the final mp4, or "" if the segment has no video
+func (sw *segmentWriter) closeAndFinalize() (string, error) {
+	_ = sw.flushGOP()
+	sw.outFile.Close()
+
+	if !sw.initWritten {
+		os.Remove(sw.outPath)
 		return "", nil
 	}
-
-	out, err := os.CreateTemp("", "vox-segment-final-*.mp4")
-	if err != nil {
-		sw.cleanup()
-		return "", err
+	stat, err := os.Stat(sw.outPath)
+	if err != nil || stat.Size() < 100 {
+		os.Remove(sw.outPath)
+		return "", nil
 	}
-	outPath := out.Name()
-	out.Close()
-
-	args := []string{"-hide_banner", "-loglevel", "error", "-i", sw.videoPath}
-	if sw.hasAudio && sw.audioPath != "" {
-		args = append(args, "-i", sw.audioPath)
-	}
-	args = append(args, "-c:v", "copy")
-	if sw.hasAudio {
-		args = append(args, "-c:a", "aac", "-b:a", "128k")
-	}
-	args = append(args, 
-		"-movflags", "faststart",
-		"-y", outPath)
-
-	var errBuf bytes.Buffer
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	cmd.Stderr = &errBuf
-	if err := cmd.Run(); err != nil {
-		os.Remove(outPath)
-		sw.cleanup()
-		return "", fmt.Errorf("segment mux: %w: %s", err, errBuf.String())
-	}
-	sw.cleanup()
-	return outPath, nil
+	return sw.outPath, nil
 }
 
-func (sw *segmentWriter) cleanup() {
-	if sw.videoPath != "" {
-		os.Remove(sw.videoPath)
-	}
-	if sw.audioPath != "" {
-		os.Remove(sw.audioPath)
-	}
+func (sw *segmentWriter) discard() {
+	sw.outFile.Close()
+	os.Remove(sw.outPath)
 }
 
 type SegmentedRecorder struct {
-	roomID string
+	roomID   string
 	streamID string
-	storage *storage.Client
-	logger *zap.Logger
+	storage  *storage.Client
+	logger   *zap.Logger
 
 	segmentDuration time.Duration
-	mu sync.Mutex
-	current *segmentWriter
-	segmentSeq int64
-	audioChannels uint8
-	audioEnabled bool
-	hasVideo bool
+	mu              sync.Mutex
+	current         *segmentWriter
+	segmentSeq      int64
+	audioEnabled    bool
+	hasVideo        bool
 
 	uploadWg sync.WaitGroup
 	resultMu sync.Mutex
 	segments []SegmentMeta
-	ticker *time.Ticker
+	ticker   *time.Ticker
 	stopOnce sync.Once
-	stopCh chan struct{}
+	stopCh   chan struct{}
 	rotateCh chan struct{}
 }
 
 func NewSegmentedRecorder(roomID, streamID string, storage *storage.Client, logger *zap.Logger) (*SegmentedRecorder, error) {
-	first, err := newSegmentWriter(false, 0)
+	first, err := newSegmentWriter()
 	if err != nil {
 		return nil, fmt.Errorf("init first segment: %w", err)
 	}
 	r := &SegmentedRecorder{
-		roomID: roomID, 
- 		streamID: streamID, 
-		storage: storage, 
-		logger: logger, 
-		segmentDuration: defaultSegmentDuration, 
-		current: first, 
-		stopCh: make(chan struct{}),
-		rotateCh: make(chan struct{}, 1),
+		roomID:          roomID,
+		streamID:        streamID,
+		storage:         storage,
+		logger:          logger,
+		segmentDuration: defaultSegmentDuration,
+		current:         first,
+		stopCh:          make(chan struct{}),
+		rotateCh:        make(chan struct{}, 1),
 	}
 	r.ticker = time.NewTicker(r.segmentDuration)
 	go r.rotationLoop()
@@ -253,7 +228,7 @@ func (r *SegmentedRecorder) rotateSegment() {
 	r.segmentSeq++
 	endedAt := time.Now().UTC()
 
-	next, err := newSegmentWriter(r.audioEnabled, r.audioChannels)
+	next, err := newSegmentWriter()
 	if err != nil {
 		r.logger.Warn("start next segment failed, keeping current", zap.Error(err))
 		r.mu.Unlock()
@@ -269,10 +244,10 @@ func (r *SegmentedRecorder) rotateSegment() {
 
 func (r *SegmentedRecorder) finalizeAndUpload(ctx context.Context, sw *segmentWriter, seq int64, endedAt time.Time) {
 	startedAt := sw.startedAt
-	tmpPath, err := sw.closeAndMux(ctx, r.logger)
+	tmpPath, err := sw.closeAndFinalize()
 	if err != nil {
-		r.logger.Warn("segment finalize failed", 
-			zap.Int64("seq", seq), 
+		r.logger.Warn("segment finalize failed",
+			zap.Int64("seq", seq),
 			zap.Error(err),
 		)
 		return
@@ -284,7 +259,7 @@ func (r *SegmentedRecorder) finalizeAndUpload(ctx context.Context, sw *segmentWr
 
 	f, err := os.Open(tmpPath)
 	if err != nil {
-		r.logger.Warn("open segment for upload failed", 
+		r.logger.Warn("open segment for upload failed",
 			zap.Int64("seq", seq),
 			zap.Error(err),
 		)
@@ -294,7 +269,7 @@ func (r *SegmentedRecorder) finalizeAndUpload(ctx context.Context, sw *segmentWr
 
 	s3Key, err := r.storage.UploadServerSegment(ctx, r.roomID, r.streamID, seq, f)
 	if err != nil {
-		r.logger.Warn("segment upload failed", 
+		r.logger.Warn("segment upload failed",
 			zap.Int64("seq", seq),
 			zap.Error(err),
 		)
@@ -303,68 +278,60 @@ func (r *SegmentedRecorder) finalizeAndUpload(ctx context.Context, sw *segmentWr
 
 	r.resultMu.Lock()
 	r.segments = append(r.segments, SegmentMeta{
-		Seq: seq, 
-		S3Key: s3Key, 
+		Seq:       seq,
+		S3Key:     s3Key,
 		StartedAt: startedAt,
-		EndedAt: endedAt,
+		EndedAt:   endedAt,
 	})
 	r.resultMu.Unlock()
 
-	r.logger.Info("segment uploaded", 
-		zap.Int64("seq", seq), 
-		zap.String("s3_key", s3Key), 
+	r.logger.Info("segment uploaded",
+		zap.Int64("seq", seq),
+		zap.String("s3_key", s3Key),
 		zap.Duration("duration", endedAt.Sub(startedAt)),
 	)
 }
 
-
-func (r *SegmentedRecorder) WriteVideoNALs(nals [][]byte) {
+// receives all NAL units of one complete picture
+// hasIDR must be true when nals contain an IDR frame
+func (r *SegmentedRecorder) WriteVideoNALs(nals [][]byte, hasIDR bool) {
 	r.mu.Lock()
 	if r.current == nil {
 		r.mu.Unlock()
 		return
 	}
 	r.hasVideo = true
-	err := r.current.writeVideo(nals)
+	err := r.current.writeVideo(nals, hasIDR)
 	r.mu.Unlock()
 
 	if err != nil {
-		r.logger.Warn("ffmpeg pipe broken, triggering emergency rotation", zap.Error(err))
+		r.logger.Warn("mp4 write error, triggering emergency rotation", zap.Error(err))
 		select {
-		case r.rotateCh <-struct{}{}:
+		case r.rotateCh <- struct{}{}:
 		default: // rotation has been scheduled
 		}
 	}
-	
 }
 
-func (r *SegmentedRecorder) StartAudio(channels uint8) error {
+// enable audio writing for subsequent segments
+func (r *SegmentedRecorder) StartAudio(_ uint8) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	if r.audioEnabled {
-		return nil
-	}
-
 	r.audioEnabled = true
-	r.audioChannels = channels
-	if r.current != nil {
-		return r.current.startAudio(channels)
-	}
 	return nil
 }
 
+// write one Opus RTP payload with its 48kHz sample count
 func (r *SegmentedRecorder) WriteAudioPacket(payload []byte, sampleCount uint32) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.current == nil {
+	if !r.audioEnabled || r.current == nil {
 		return
 	}
 	r.current.writeAudio(payload, sampleCount)
 }
 
-// close finalized segment, wait for all segments uploaded, return segment list
-// called when stream ended properly
+// stop rotation, uploads the last segment, and returns all segment metadata
 func (r *SegmentedRecorder) Finalize(ctx context.Context) ([]SegmentMeta, error) {
 	r.stopOnce.Do(func() {
 		r.ticker.Stop()
@@ -383,7 +350,7 @@ func (r *SegmentedRecorder) Finalize(ctx context.Context) ([]SegmentMeta, error)
 			r.finalizeAndUpload(ctx, last, seq, time.Now().UTC())
 		})
 	} else if last != nil {
-		last.cleanup()
+		last.discard()
 	}
 
 	r.uploadWg.Wait()
@@ -400,7 +367,7 @@ func (r *SegmentedRecorder) Finalize(ctx context.Context) ([]SegmentMeta, error)
 	return result, nil
 }
 
-// discard recording, used when stream failed
+// discard the current segment without uploading (stream failed)
 func (r *SegmentedRecorder) Close() {
 	r.stopOnce.Do(func() {
 		r.ticker.Stop()
@@ -409,32 +376,10 @@ func (r *SegmentedRecorder) Close() {
 
 	r.mu.Lock()
 	current := r.current
-	r.current = nil 
+	r.current = nil
 	r.mu.Unlock()
 
 	if current != nil {
 		current.discard()
 	}
 }
-
-func (sw *segmentWriter) discard() {
-	if sw.videoIn != nil {
-		sw.videoIn.Close()
-		sw.videoIn = nil
-	}
-	if sw.ffmpegCmd != nil && sw.ffmpegCmd.Process != nil {
-		sw.ffmpegCmd.Wait()
-	}
-	if sw.oggWriter != nil {
-		sw.oggWriter.Close()
-		sw.oggWriter = nil
-	}
-	if sw.audioFile != nil {
-		sw.audioFile.Close()
-		sw.audioFile = nil
-	}
-	sw.cleanup()
-}
-
-
-

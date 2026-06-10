@@ -234,8 +234,8 @@ func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
 
 	// tier 2: wire NALSink into recorder
 	if p.recorder != nil {
-		fe.SetNALSink(func(nals [][]byte, _ bool) {
-			p.recorder.WriteVideoNALs(nals)
+		fe.SetNALSink(func(nals [][]byte, hasIDR bool) {
+			p.recorder.WriteVideoNALs(nals, hasIDR)
 		})
 	}
 	

@@ -34,6 +34,32 @@ func (m *SessionManager) Add(roomID, participantID, streamType string, p *Peer) 
 	m.sessions[key] = p
 }
 
+func (m *SessionManager) Replace(roomID, participantID, streamType string, p *Peer) *Peer {
+	key := sessionKey{
+		roomID: roomID, 
+		participantID: participantID,
+		streamType: streamType,
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	old := m.sessions[key] // nil if it is not created
+	m.sessions[key] = p
+	return old
+}
+
+func (m *SessionManager) RemoveIfSame(roomID, participantID, streamType string, p *Peer) {
+	key := sessionKey{
+		roomID: roomID, 
+		participantID: participantID,
+		streamType: streamType,
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if current, ok := m.sessions[key]; ok && current == p {
+		delete(m.sessions, key)
+	}
+}
+
 func (m *SessionManager) Remove(roomID, participantID, streamType string) {
 	m.mu.Lock()
 	delete(m.sessions, sessionKey{
