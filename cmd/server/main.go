@@ -21,6 +21,7 @@ import (
 	grpcclient "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
 	grpctransport "github.com/vientrlenh/vox-streaming/internal/transport/grpc/server"
 	httpRoute "github.com/vientrlenh/vox-streaming/internal/transport/http"
+	segmenttransport "github.com/vientrlenh/vox-streaming/internal/transport/segment"
 	webrtctransport "github.com/vientrlenh/vox-streaming/internal/transport/webrtc"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
 	"github.com/vientrlenh/vox-streaming/pkg/auth"
@@ -128,6 +129,11 @@ func main() {
 		}
 	}()
 
+	storageClient := ensureStorage(startupCtx, logger)
+	segmentRegistry := cache.NewSegmentRegistry(redisClient)
+	segmentUseCase := usecase.NewSegmentUseCase(storageClient, segmentRegistry, sessionRegistry, logger)
+	segmentHandler := segmenttransport.NewSegmentHandler(segmentUseCase, jwtValidator, logger)
+
 	webrtcHandler := webrtctransport.NewHandler(
 		webrtctransport.PeerConfig{
 			ICEServers: iceServers,
@@ -140,6 +146,7 @@ func main() {
 		jwtValidator,
 		broadCaster,
 		examClient,
+		storageClient,
 	)
 
 	addr := os.Getenv("WEBRTC_ADDR")
@@ -150,7 +157,7 @@ func main() {
 	srv := &http.Server{Addr: addr, Handler: mux}
 
 	go func() {
-		httpRoute.Register(mux, webrtcHandler)
+		httpRoute.Register(mux, webrtcHandler, segmentHandler)
 		logger.Info("webrtc signaling server started", zap.String("addr", addr))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("webrtc server error", zap.Error(err))
@@ -260,8 +267,6 @@ func main() {
 	go func() {
 		httpRoute.RunMetric(logger)
 	}()
-
-	ensureStorage(startupCtx, logger)
 	
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
@@ -402,7 +407,7 @@ func parseAllowedOrigins() []string {
 	return origins
 }
 
-func ensureStorage(startupCtx context.Context, logger *zap.Logger) {
+func ensureStorage(startupCtx context.Context, logger *zap.Logger) *storage.Client {
 	storageEndpoint := os.Getenv("STORAGE_ENDPOINT")
 	if storageEndpoint == "" {
 		storageEndpoint = "localhost:9000"
@@ -426,5 +431,5 @@ func ensureStorage(startupCtx context.Context, logger *zap.Logger) {
 	if err := storageClient.EnsureBuckets(startupCtx); err != nil {
 		logger.Fatal("ensure bucket failed", zap.Error(err))
 	}
-
+	return storageClient
 }

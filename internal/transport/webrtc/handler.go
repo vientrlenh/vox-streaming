@@ -11,10 +11,11 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
+	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
+	grpcclient "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
 	"github.com/vientrlenh/vox-streaming/pkg/auth"
 	"go.uber.org/zap"
-	grpcclient "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
 )
 
 type SignalMessage struct {
@@ -29,6 +30,7 @@ type Handler struct {
 	streamUseCase   *usecase.StreamUseCase
 	monitorUseCase 	*usecase.MonitorUseCase
 	upgrader  websocket.Upgrader
+	storage *storage.Client
 	logger    *zap.Logger
 	validator *auth.Validator
 	broadcaster *RedisBroadcaster
@@ -58,13 +60,15 @@ func NewHandler(
 	logger *zap.Logger,
 	validator *auth.Validator,
 	broadcaster *RedisBroadcaster, 
-	examClient *grpcclient.ExamClient,
+	examClient *grpcclient.ExamClient, 
+	storage *storage.Client,
 ) *Handler {
 	return &Handler{
 		peerCfg:  peerCfg,
 		sessions: NewSessionManager(),
 		streamUseCase:  streamUseCase,
 		monitorUseCase: monitorUseCase,
+		storage: storage,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  8192,
 			WriteBufferSize: 8192,
@@ -82,8 +86,8 @@ func NewHandler(
 
 func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	roomID := q.Get("room_id")
-	streamType := q.Get("stream_type")
+	roomID := q.Get("roomId")
+	streamType := q.Get("streamType")
 	token := q.Get("token")
 
 	claims, err := h.validator.Validate(token)
@@ -128,7 +132,7 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rawConn.Close()
 
-	peer, err := NewPeer(h.peerCfg, roomID, claims.UserID, streamType, h.streamUseCase, h.monitorUseCase, h.logger)
+	peer, err := NewPeer(h.peerCfg, roomID, claims.UserID, streamType, h.streamUseCase, h.monitorUseCase, h.storage, h.logger)
 	if err != nil {
 		h.logger.Error("peer creation failed", zap.Error(err))
 		_ = rawConn.WriteJSON(map[string]string{

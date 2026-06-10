@@ -8,8 +8,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
+	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
+	"github.com/vientrlenh/vox-streaming/internal/recorder"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
 	"go.uber.org/zap"
 )
@@ -44,6 +47,8 @@ type Peer struct {
 
 	streamUseCase *usecase.StreamUseCase
 	monitorUseCase *usecase.MonitorUseCase
+	storage *storage.Client
+	recorder *recorder.RTPRecorder
 	logger  *zap.Logger
 
 	closedByFailure atomic.Bool
@@ -58,6 +63,7 @@ func NewPeer(
 	roomID, participantID, streamType string,
 	streamUseCase *usecase.StreamUseCase, 
 	monitorUseCase *usecase.MonitorUseCase,
+	storage *storage.Client,
 	logger *zap.Logger,
 ) (*Peer, error) {
 	me := &webrtc.MediaEngine{}
@@ -94,6 +100,7 @@ func NewPeer(
 		frameInterval: fi,
 		streamUseCase: streamUseCase,
 		monitorUseCase: monitorUseCase,
+		storage: storage,
 		done:          make(chan struct{}),
 		logger: logger.With(
 			zap.String("room_id", roomID),
@@ -103,6 +110,14 @@ func NewPeer(
 		),
 	}
 	p.closedByFailure.Store(false)
+	if storage != nil {
+		rec, err := recorder.NewRTPRecorder(roomID, streamID, storage, logger)
+		if err != nil {
+			logger.Warn("recorder init failed, recording disabled", zap.Error(err))
+		} else {
+			p.recorder = rec
+		}
+	}
 	p.setupCallbacks()
 	return p, nil
 }
@@ -175,45 +190,128 @@ func (p *Peer) cancelDisconnectTimer() {
 
 func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
 	ctx, cancel := context.WithCancel(context.Background())
+	fe := recorder.NewFrameExtractor(track, p.pc, p.logger)
+
+	// tier 2: wire NALSink into recorder
+	if p.recorder != nil {
+		fe.SetNALSink(func(nals [][]byte, _ bool) {
+			p.recorder.WriteVideoNALs(nals)
+		})
+	}
+	
 	go func() {
 		<-p.done
 		cancel()
 	}()
 
+	// ReadLoop running parallelism
 	go func() {
-		ticker := time.NewTicker(p.frameInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				seq := p.frameSeq.Add(1)
-				frameURL := ""
-				if err := p.streamUseCase.PublishFrame(ctx, p.roomID, p.participantID, p.streamID, p.streamType, frameURL, seq); err != nil {
-					p.logger.Warn("publish frame failed", zap.Int64("seq", seq), zap.Error(err))
-				}
-			}
-		}
+		fe.ReadLoop(ctx)
+		cancel() // track error -> stop ticker
 	}()
 
-	buf := make([]byte, 4096)
+	ticker := time.NewTicker(p.frameInterval)
+	defer ticker.Stop()
+
 	for {
-		if _, _, err := track.Read(buf); err != nil {
+		select {
+		case <-ctx.Done():
 			return
+		case <-ticker.C:
+			seq := p.frameSeq.Add(1)
+			frameURL := p.captureAndUpload(ctx, fe, seq)
+			if err := p.streamUseCase.PublishFrame(
+				ctx, p.roomID, p.participantID, p.streamID, p.streamType, frameURL, seq,
+			); err != nil {
+				p.logger.Warn("publish frame failed", 
+					zap.Int64("seq", seq), 
+					zap.Error(err),
+				)
+			}
 		}
 	}
 }
 
+func (p *Peer) captureAndUpload(ctx context.Context, fe *recorder.FrameExtractor, seq int64) string {
+	if p.storage == nil {
+		return ""
+	}
+
+	fe.RequestKeyFrame()
+	select {
+	case <-fe.IDRReady():
+	case <-time.After(500 * time.Millisecond):
+	case <-ctx.Done():
+		return ""
+	}
+
+	captureCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	jpeg, err := fe.CaptureJPEG(captureCtx)
+	if err != nil {
+		p.logger.Warn("frame capture failed", 
+			zap.Int64("seq", seq), 
+			zap.Error(err),
+		)
+		return ""
+	}
+	if jpeg == nil {
+		return ""
+	}
+
+	key, err := p.storage.UploadFrame(ctx, p.roomID, p.streamID, seq, jpeg)
+	if err != nil {
+		p.logger.Warn("frame upload failed", 
+			zap.Int64("seq", seq),
+			zap.Error(err),
+		)
+		return ""
+	}
+
+	url, err := p.storage.PresignFrame(ctx, key, p.storage.PresignExpiry())
+	if err != nil {
+		p.logger.Warn("frame presign failed",
+			zap.Int64("seq", seq), 
+			zap.Error(err),
+		)
+		return key // let AI Service resolve raw key
+	}
+	return url
+}
+
 func (p *Peer) handleAudioTrack(track *webrtc.TrackRemote) {
-	p.logger.Info("audio track drain started", 
-		zap.String("codec", track.Codec().MimeType), 
-	)
+	if p.recorder != nil {
+		if err := p.recorder.StartAudio(1); err != nil {
+			p.logger.Warn("start audio recorder failed", zap.Error(err))
+		}
+	}
 	buf := make([]byte, 4096)
+	var prevTS uint32
+	var hasFirst bool
+
 	for {
-		if _, _, err := track.Read(buf); err != nil {
+		n, _, err := track.Read(buf)
+		if err != nil {
 			return
 		}
+		if p.recorder == nil {
+			continue
+		}
+		var pkt rtp.Packet
+		if err := pkt.Unmarshal(buf[:n]); err != nil {
+			continue
+		}
+		sampleCount := uint32(recorder.OpusFrameSize) // 960 default (20ms at 48 kHz)
+		if hasFirst && pkt.Timestamp > prevTS {
+			diff := pkt.Timestamp - prevTS
+			if diff <= 5760 { // sanity: max 120ms
+				sampleCount = diff
+			}
+		}
+		prevTS = pkt.Timestamp
+		hasFirst = true
+		p.recorder.WriteAudioPacket(pkt.Payload, sampleCount)
 	}
 }
 
@@ -270,13 +368,29 @@ func (p *Peer) close() {
 		close(p.done)
 		duration := int64(time.Since(p.startedAt).Seconds())
 		ctx := context.Background()
+
+		recordingURL := ""
+		if p.recorder != nil {
+			if p.closedByFailure.Load() {
+				p.recorder.Close() // stream failed, no upload
+			} else {
+				url, err := p.recorder.Finalize(ctx)
+				if err != nil {
+					p.logger.Warn("recording finalize failed", zap.Error(err))
+				} else {
+					recordingURL = url
+				}
+			}
+		}
 		if p.closedByFailure.Load() {
-			if err := p.monitorUseCase.PublishAlert(ctx, p.roomID, p.participantID, p.streamID, domain.AlertStreamDropped, 1.0, time.Now().UTC()); err != nil {
-				p.logger.Warn("stream dropped alert failed", zap.Error(err)) // stream tiếp tục chạy, không return
+			if err := p.monitorUseCase.PublishAlert(
+				ctx, p.roomID, p.participantID, p.streamID, domain.AlertStreamDropped, 1.0, time.Now().UTC(),
+			); err != nil {
+				p.logger.Warn("stream dropped alert failed", zap.Error(err)) // stream continue running, no return
 			}
 		}
 		if err := p.streamUseCase.NotifyStreamEnded(
-			ctx, p.roomID, p.participantID, p.streamID, p.streamType, "", duration,
+			ctx, p.roomID, p.participantID, p.streamID, p.streamType, recordingURL, duration,
 		); err != nil {
 			p.logger.Error("notify stream ended failed", zap.Error(err))
 		}

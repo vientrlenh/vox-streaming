@@ -13,35 +13,35 @@ import (
 const sessionTTL = 5 * time.Minute
 
 type SessionInfo struct {
-	InstanceID 	string `json:"instanceId"`
-	RoomID 		string 	`json:"roomId"`
-	StreamID 	string `json:"streamId"`
-	ParticipantID string `json:"participantId"`
-	StreamType 	string 	`json:"streamType"`
-	StartedAt time.Time `json:"startedAt"`
+	InstanceID    string    `json:"instanceId"`
+	RoomID        string    `json:"roomId"`
+	StreamID      string    `json:"streamId"`
+	ParticipantID string    `json:"participantId"`
+	StreamType    string    `json:"streamType"`
+	StartedAt     time.Time `json:"startedAt"`
 }
 
 type SessionRegistry struct {
-	client *redis.Client
+	client     *redis.Client
 	instanceID string
 }
 
 func NewSessionRegistry(client *redis.Client) *SessionRegistry {
 	instanceID, _ := os.Hostname()
 	return &SessionRegistry{
-		client: client, 
+		client:     client,
 		instanceID: instanceID,
 	}
 }
 
 func (r *SessionRegistry) Register(ctx context.Context, roomID, participantID, streamType, streamID string, startedAt time.Time) error {
 	val, err := json.Marshal(SessionInfo{
-		InstanceID: r.instanceID, 
-		RoomID: roomID,
-		StreamID: streamID,
+		InstanceID:    r.instanceID,
+		RoomID:        roomID,
+		StreamID:      streamID,
 		ParticipantID: participantID,
-		StreamType: streamType,
-		StartedAt: startedAt,
+		StreamType:    streamType,
+		StartedAt:     startedAt,
 	})
 
 	if err != nil {
@@ -59,7 +59,7 @@ func (r *SessionRegistry) Lookup(ctx context.Context, roomID, participantID, str
 	if err != nil {
 		return nil, fmt.Errorf("streaming session registry lookup: %w", err)
 	}
-	var info SessionInfo 
+	var info SessionInfo
 	if err := json.Unmarshal(val, &info); err != nil {
 		return nil, fmt.Errorf("streaming session registry unmarshal: %w", err)
 	}
@@ -84,7 +84,7 @@ func (r *SessionRegistry) scanByPattern(ctx context.Context, pattern string) ([]
 	iter := r.client.Scan(ctx, 0, pattern, 0).Iterator()
 	for iter.Next(ctx) {
 		keys = append(keys, iter.Val())
-	} 
+	}
 	if err := iter.Err(); err != nil {
 		return nil, fmt.Errorf("streaming session registry scan: %w", err)
 	}
@@ -110,7 +110,6 @@ func (r *SessionRegistry) scanByPattern(ctx context.Context, pattern string) ([]
 	}
 	return infos, nil
 }
-
 
 func (r *SessionRegistry) Refresh(ctx context.Context, roomID, participantID, streamType string) error {
 	return r.client.Expire(ctx, sessionKey(roomID, participantID, streamType), sessionTTL).Err()

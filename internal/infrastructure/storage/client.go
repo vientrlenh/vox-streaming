@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -177,7 +178,7 @@ func (c *Client) PresignRecording(ctx context.Context, key string, expiry time.D
 // padding 10 chữ số -> sort lexicographic đúng thứ tự cho playback review
 // rooms/{roomID}/streams/{streamID}/{seq:010d}.jpg
 func frameKey(roomID, streamID string, seq int64) string {
-	return fmt.Sprintf("room/%s/streams/%s/%010d.jpg", roomID, streamID, seq)
+	return fmt.Sprintf("rooms/%s/streams/%s/%010d.jpg", roomID, streamID, seq)
 }
 
 // rooms/{roomID}/streams/{streamID}.webm (hoặc .mp4)
@@ -187,4 +188,42 @@ func recordingKey(roomID, streamID, contentType string) string {
 		ext = "mp4"
 	}
 	return fmt.Sprintf("rooms/%s/streams/%s.%s", roomID, streamID, ext)
+}
+
+func (c *Client) PresignExpiry() time.Duration {
+	return c.cfg.PresignExpiry
+}
+
+func segmentKey(roomID, streamID string, seq int64) string {
+	return fmt.Sprintf("rooms/%s/streams/%s/segments/%04d.webm", roomID, streamID, seq)
+}
+
+func (c *Client) UploadSegment(ctx context.Context, roomID, streamID string, seq int64, data []byte) (string, error) {
+	key := segmentKey(roomID, streamID, seq)
+	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(c.cfg.RecordingBucket), 
+		Key: aws.String(key), 
+		Body: bytes.NewReader(data), 
+		ContentType: aws.String("video/webm"),
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload segment: %w", err)
+	}
+	return key, nil
+}
+
+
+// save recording file from io.Reader to prevent loading all to RAM
+func (c *Client) UploadRecordingStream(ctx context.Context, roomID, streamID string, r io.Reader) (string, error) {
+	key := fmt.Sprintf("room/%s/streams/%s.webm", roomID, streamID)
+	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(c.cfg.RecordingBucket),
+		Key: aws.String(key),
+		Body: r, 
+		ContentType: aws.String("video/webm"),
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload recording stream: %w", err)
+	}
+	return key, nil
 }

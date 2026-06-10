@@ -9,35 +9,35 @@ import (
 )
 
 type Config struct {
-	Addr        string `mapstructure:"addr"`
-	Password    string `mapstructure:"password"`
-	DB          int    `mapstructure:"db"`
-	DialTimeout time.Duration `mapstructure:"dial_timeout"`
-	ReadTimeout time.Duration `mapstructure:"read_timeout"`
+	Addr         string        `mapstructure:"addr"`
+	Password     string        `mapstructure:"password"`
+	DB           int           `mapstructure:"db"`
+	DialTimeout  time.Duration `mapstructure:"dial_timeout"`
+	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
 	WriteTimeout time.Duration `mapstructure:"write_timeout"`
-	PoolSize 	int 		`mapstructure:"pool_size"`
+	PoolSize     int           `mapstructure:"pool_size"`
 }
 
 func DefaultConfig(addr string) Config {
 	return Config{
-		Addr: addr,
-		DB: 0, 
-		DialTimeout: 5 * time.Second, 
-		ReadTimeout: 3 * time.Second,
+		Addr:         addr,
+		DB:           0,
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  3 * time.Second,
 		WriteTimeout: 3 * time.Second,
-		PoolSize: 10,
+		PoolSize:     10,
 	}
 }
 
 func NewClient(cfg Config) (*redis.Client, error) {
 	client := redis.NewClient(&redis.Options{
-		Addr: cfg.Addr, 
-		Password: cfg.Password, 
-		DB: cfg.DB, 
-		DialTimeout: cfg.DialTimeout, 
-		ReadTimeout: cfg.ReadTimeout, 
+		Addr:         cfg.Addr,
+		Password:     cfg.Password,
+		DB:           cfg.DB,
+		DialTimeout:  cfg.DialTimeout,
+		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
-		PoolSize: cfg.PoolSize,
+		PoolSize:     cfg.PoolSize,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.DialTimeout)
