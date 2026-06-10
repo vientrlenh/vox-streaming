@@ -194,7 +194,7 @@ func (fe *FrameExtractor) commitPicture() {
 		fe.sink(fe.picBuf, hasIDR)
 	}
 
-	// tier 1: only buffer IDR to extract JPEG
+	// tier 1: only buffer IDR for keyframe capture
 	if hasIDR {
 		fe.mu.Lock()
 		fe.idrNALs = fe.picBuf
@@ -208,7 +208,8 @@ func (fe *FrameExtractor) commitPicture() {
 	fe.picBuf = nil
 }
 
-
+// Deprecated: this method make ffmpeg spawn for capturing jpeg image -> not ideal for many sessions ==> use CaptureKeyFrame instead
+// 
 // encode the latest buffered IDR frame as JPEG via ffmpeg
 func (fe *FrameExtractor) CaptureJPEG(ctx context.Context) ([]byte, error) {
 	fe.mu.Lock()
@@ -263,4 +264,28 @@ func h264ToJPEG(ctx context.Context, h264Data []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// return Annex-B encoded H.264 keyframe (SPS + PPS + IDR)
+// no need to spawn ffmpeg - decode the image using OpenCV
+func (fe *FrameExtractor) CaptureKeyFrame() []byte {
+	fe.mu.Lock()
+	defer fe.mu.Unlock()
 
+	if !fe.idrReady || len(fe.idrNALs) == 0 {
+		return nil
+	}
+
+	var buf bytes.Buffer
+	if len(fe.sps) > 0 {
+		buf.Write(annexBStartCode)
+		buf.Write(fe.sps)
+	}
+	if len(fe.pps) > 0 {
+		buf.Write(annexBStartCode)
+		buf.Write(fe.pps)
+	}
+	for _, nal := range fe.idrNALs {
+		buf.Write(annexBStartCode)
+		buf.Write(nal)
+	}
+	return buf.Bytes()
+}

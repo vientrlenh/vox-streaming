@@ -48,7 +48,7 @@ type Peer struct {
 	streamUseCase *usecase.StreamUseCase
 	monitorUseCase *usecase.MonitorUseCase
 	storage *storage.Client
-	recorder *recorder.RTPRecorder
+	recorder *recorder.SegmentedRecorder
 	logger  *zap.Logger
 
 	closedByFailure atomic.Bool
@@ -67,8 +67,40 @@ func NewPeer(
 	logger *zap.Logger,
 ) (*Peer, error) {
 	me := &webrtc.MediaEngine{}
-	if err := me.RegisterDefaultCodecs(); err != nil {
-		return nil, fmt.Errorf("register codecs: %w", err)
+	
+	// Firefox, old Chrome
+	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType: webrtc.MimeTypeH264, 
+			ClockRate: 90000,
+			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+		},
+		PayloadType: 102,
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		return nil, fmt.Errorf("H.264 codec register with level id 42e01f failed: %w", err)
+	}
+
+	// high profile: Chrome/Safari, better quality and bitrate
+	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType: webrtc.MimeTypeH264,
+			ClockRate: 90000, 
+			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640028",
+		},
+		PayloadType: 104,
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		return nil, fmt.Errorf("H.264 codec register with level id 640028 failed: %w", err)
+	}
+
+	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType: webrtc.MimeTypeOpus,
+			ClockRate: 48000,
+			Channels: 2,
+		},
+		PayloadType: 111,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		return nil, fmt.Errorf("Opus codec register failed: %w", err)
 	}
 
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(me))
@@ -111,7 +143,7 @@ func NewPeer(
 	}
 	p.closedByFailure.Store(false)
 	if storage != nil {
-		rec, err := recorder.NewRTPRecorder(roomID, streamID, storage, logger)
+		rec, err := recorder.NewSegmentedRecorder(roomID, streamID, storage, logger)
 		if err != nil {
 			logger.Warn("recorder init failed, recording disabled", zap.Error(err))
 		} else {
@@ -189,6 +221,14 @@ func (p *Peer) cancelDisconnectTimer() {
 }
 
 func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
+	if track.Codec().MimeType != webrtc.MimeTypeH264 {
+		p.logger.Error("unexpected video codec, recording disabled", 
+			zap.String("codec", track.Codec().MimeType), 
+			zap.String("expected", webrtc.MimeTypeH264),
+		)
+		return
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	fe := recorder.NewFrameExtractor(track, p.pc, p.logger)
 
@@ -245,22 +285,13 @@ func (p *Peer) captureAndUpload(ctx context.Context, fe *recorder.FrameExtractor
 		return ""
 	}
 
-	captureCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
 
-	jpeg, err := fe.CaptureJPEG(captureCtx)
-	if err != nil {
-		p.logger.Warn("frame capture failed", 
-			zap.Int64("seq", seq), 
-			zap.Error(err),
-		)
-		return ""
-	}
-	if jpeg == nil {
+	h264Frame := fe.CaptureKeyFrame()
+	if h264Frame == nil {
 		return ""
 	}
 
-	key, err := p.storage.UploadFrame(ctx, p.roomID, p.streamID, seq, jpeg)
+	key, err := p.storage.UploadFrame(ctx, p.roomID, p.streamID, seq, h264Frame)
 	if err != nil {
 		p.logger.Warn("frame upload failed", 
 			zap.Int64("seq", seq),
@@ -282,7 +313,7 @@ func (p *Peer) captureAndUpload(ctx context.Context, fe *recorder.FrameExtractor
 
 func (p *Peer) handleAudioTrack(track *webrtc.TrackRemote) {
 	if p.recorder != nil {
-		if err := p.recorder.StartAudio(1); err != nil {
+		if err := p.recorder.StartAudio(2); err != nil {
 			p.logger.Warn("start audio recorder failed", zap.Error(err))
 		}
 	}
@@ -369,16 +400,18 @@ func (p *Peer) close() {
 		duration := int64(time.Since(p.startedAt).Seconds())
 		ctx := context.Background()
 
-		recordingURL := ""
+		segmentKeys := []string{}
 		if p.recorder != nil {
 			if p.closedByFailure.Load() {
 				p.recorder.Close() // stream failed, no upload
 			} else {
-				url, err := p.recorder.Finalize(ctx)
+				segments, err := p.recorder.Finalize(ctx)
 				if err != nil {
 					p.logger.Warn("recording finalize failed", zap.Error(err))
 				} else {
-					recordingURL = url
+					for _, s := range segments {
+						segmentKeys = append(segmentKeys, s.S3Key)
+					}
 				}
 			}
 		}
@@ -390,7 +423,7 @@ func (p *Peer) close() {
 			}
 		}
 		if err := p.streamUseCase.NotifyStreamEnded(
-			ctx, p.roomID, p.participantID, p.streamID, p.streamType, recordingURL, duration,
+			ctx, p.roomID, p.participantID, p.streamID, p.streamType, segmentKeys, duration,
 		); err != nil {
 			p.logger.Error("notify stream ended failed", zap.Error(err))
 		}

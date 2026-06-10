@@ -6,6 +6,7 @@ option go_package = "pkg/pb/exam/v1;examv1";
 
 service ExamService {
     rpc ValidateAccess(ValidateAccessRequest) returns (ValidateAccessResponse);
+    rpc UpdateRecording(UpdateRecordingRequest) returns (UpdateRecordingResponse);
 }
 
 message ValidateAccessRequest {
@@ -17,4 +18,15 @@ message ValidateAccessRequest {
 message ValidateAccessResponse {
     bool allowed = 1;
     string reason = 2;
+}
+
+message UpdateRecordingRequest {
+    string stream_id = 1;
+    string room_id = 2;
+    string recording_url = 3;
+    int64 duration_secs = 4;
+}
+
+message UpdateRecordingResponse {
+    bool success = 1;
 }

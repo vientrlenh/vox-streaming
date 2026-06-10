@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ExamService_ValidateAccess_FullMethodName = "/exam.v1.ExamService/ValidateAccess"
+	ExamService_ValidateAccess_FullMethodName  = "/exam.v1.ExamService/ValidateAccess"
+	ExamService_UpdateRecording_FullMethodName = "/exam.v1.ExamService/UpdateRecording"
 )
 
 // ExamServiceClient is the client API for ExamService service.
@@ -27,6 +28,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ExamServiceClient interface {
 	ValidateAccess(ctx context.Context, in *ValidateAccessRequest, opts ...grpc.CallOption) (*ValidateAccessResponse, error)
+	UpdateRecording(ctx context.Context, in *UpdateRecordingRequest, opts ...grpc.CallOption) (*UpdateRecordingResponse, error)
 }
 
 type examServiceClient struct {
@@ -47,11 +49,22 @@ func (c *examServiceClient) ValidateAccess(ctx context.Context, in *ValidateAcce
 	return out, nil
 }
 
+func (c *examServiceClient) UpdateRecording(ctx context.Context, in *UpdateRecordingRequest, opts ...grpc.CallOption) (*UpdateRecordingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateRecordingResponse)
+	err := c.cc.Invoke(ctx, ExamService_UpdateRecording_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExamServiceServer is the server API for ExamService service.
 // All implementations must embed UnimplementedExamServiceServer
 // for forward compatibility.
 type ExamServiceServer interface {
 	ValidateAccess(context.Context, *ValidateAccessRequest) (*ValidateAccessResponse, error)
+	UpdateRecording(context.Context, *UpdateRecordingRequest) (*UpdateRecordingResponse, error)
 	mustEmbedUnimplementedExamServiceServer()
 }
 
@@ -64,6 +77,9 @@ type UnimplementedExamServiceServer struct{}
 
 func (UnimplementedExamServiceServer) ValidateAccess(context.Context, *ValidateAccessRequest) (*ValidateAccessResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ValidateAccess not implemented")
+}
+func (UnimplementedExamServiceServer) UpdateRecording(context.Context, *UpdateRecordingRequest) (*UpdateRecordingResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateRecording not implemented")
 }
 func (UnimplementedExamServiceServer) mustEmbedUnimplementedExamServiceServer() {}
 func (UnimplementedExamServiceServer) testEmbeddedByValue()                     {}
@@ -104,6 +120,24 @@ func _ExamService_ValidateAccess_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExamService_UpdateRecording_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateRecordingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExamServiceServer).UpdateRecording(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExamService_UpdateRecording_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExamServiceServer).UpdateRecording(ctx, req.(*UpdateRecordingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExamService_ServiceDesc is the grpc.ServiceDesc for ExamService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -114,6 +148,10 @@ var ExamService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ValidateAccess",
 			Handler:    _ExamService_ValidateAccess_Handler,
+		},
+		{
+			MethodName: "UpdateRecording",
+			Handler:    _ExamService_UpdateRecording_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

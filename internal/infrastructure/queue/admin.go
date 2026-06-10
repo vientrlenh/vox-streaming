@@ -19,15 +19,15 @@ type TopicSpec struct {
 	NumPartitions     int
 	ReplicationFactor int
 
-	// Thời gian giữ message, nếu để -1 thì là không giới hạn
-	// Mặc định thời gian giữ frame event là 1 giờ, record thì giữ lâu hơn
+	// Time to keep the message, -1 if it is unlimited
+	// Default frame event keeping time is 1 hour
 	RetentionMS int64
 }
 
 var RequiredTopics = []TopicSpec{
 	{
 		Name:              domain.TopicFrameReady,
-		NumPartitions:     12, // giữ tối đa 12 consumer song song
+		NumPartitions:     12, // keep 12 consumers parallelism
 		ReplicationFactor: 1,
 		RetentionMS:       3600000,
 	},

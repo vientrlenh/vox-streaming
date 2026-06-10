@@ -38,7 +38,7 @@ type StreamEndedEvent struct {
 	ParticipantID string    `json:"participantId"`
 	StreamID      string    `json:"streamId"`
 	StreamType    string    `json:"streamType"`
-	RecordingURL  string    `json:"recordingUrl"`
+	SegmentKeys   []string 	`json:"segmentKeys"`
 	Duration      int64     `json:"durationSecs"`
 	EndedAt       time.Time `json:"endedAt"`
 }

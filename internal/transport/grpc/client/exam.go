@@ -78,3 +78,22 @@ func (c *ExamClient) Close() {
 		c.logger.Warn("exam grpc client close failed", zap.Error(err))
 	}
 }
+
+func (c *ExamClient) UpdateRecording(ctx context.Context, streamID, roomID, recordingURL string, durationSecs int64) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := c.client.UpdateRecording(ctx, &examv1.UpdateRecordingRequest{
+		StreamId: streamID, 
+		RoomId: roomID, 
+		RecordingUrl: recordingURL, 
+		DurationSecs: durationSecs,
+	})
+	if err != nil {
+		return fmt.Errorf("update recording: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("update recording rejected by exam service (stream_id=%s)", streamID)
+	}
+	return nil
+}

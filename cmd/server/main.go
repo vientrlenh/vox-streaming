@@ -228,18 +228,55 @@ func main() {
 		},
 	)
 
-	monitor := queue.NewMonitor(
-		[]*queue.Consumer{ frameConsumer, streamStartedConsumer, streamEndedConsumer },
-		dlqWriter, 
+	assemblerKafkaCfg := kafkaCfg
+	assemblerKafkaCfg.GroupID = "vox-assembler"
+	
+	assemblerUseCase := usecase.NewAssemblerUseCase(storageClient, examClient, logger)
+	assemblerConsumer := queue.NewConsumer(
+		assemblerKafkaCfg, 
+		domain.TopicStreamEnded, 
+		handleAssembly(logger, assemblerUseCase), 
+		logger, 
+		&queue.ConsumerOptions{
+			MaxRetries: 10,
+			RetryDelay: 5 * time.Second, 
+			DLQ: dlqWriter, 
+			CommitOnDLQFailure: false,
+			MaxDLQFails: 3,
+		},
+	)
+
+	allConsumers := []*queue.Consumer{
+		frameConsumer, 
+		streamStartedConsumer, 
+		streamEndedConsumer, 
+		assemblerConsumer, 
+	}
+	alertConfigs := queue.BuildAlertConfigs(
+		allConsumers, 
 		queue.DefaultAlertConfigs, 
+		map[queue.ConsumerKey]queue.AlertConfig{
+			{Topic: domain.TopicStreamEnded, GroupID: "vox-assembler"}: {
+				LagThreshold: 50,
+				LagDuration: 5 * time.Minute,
+				DLQThreshold: 3,
+			},
+		},
+	)
+
+	monitor := queue.NewMonitor(
+		allConsumers,
+		dlqWriter, 
+		alertConfigs, 
 		alertFn, 
-		kafkaCfg.GroupID, 
 		logger,
 	)
 
 	frameConsumer.SetMonitor(monitor)
 	streamStartedConsumer.SetMonitor(monitor)
 	streamEndedConsumer.SetMonitor(monitor)
+	assemblerConsumer.SetMonitor(monitor)
+
 
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
@@ -259,6 +296,12 @@ func main() {
 	go func() {
 		if err := streamEndedConsumer.Run(runCtx); err != nil {
 			logger.Error("stream ended consumer error", zap.Error(err))
+		}
+	}()
+
+	go func() {
+		if err := assemblerConsumer.Run(runCtx); err != nil {
+			logger.Error("assembler consumer error", zap.Error(err))
 		}
 	}()
 
@@ -283,6 +326,7 @@ func main() {
 		frameConsumer.Close()
 		streamStartedConsumer.Close()
 		streamEndedConsumer.Close()
+		assemblerConsumer.Close()
 		publisher.Close()
 		dlqWriter.Close()
 		grpcServer.Shutdown()
@@ -320,7 +364,6 @@ func handleFrameReady(logger *zap.Logger, bc *webrtctransport.RedisBroadcaster) 
 			zap.Int64("seq", event.SequenceNo),
 		)
 
-		// xử lý nghiệp vụ (thêm sau)
 		return nil
 	}
 }
@@ -354,7 +397,7 @@ func handleStreamEnded(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.Han
 
 		logger.Info("stream ended", 
 			zap.String("stream_id", event.StreamID), 
-			zap.String("recording_url", event.RecordingURL), 
+			zap.Int("segments_count", len(event.SegmentKeys)), 
 			zap.Int64("duration_secs", event.Duration),
 		)
 
@@ -432,4 +475,14 @@ func ensureStorage(startupCtx context.Context, logger *zap.Logger) *storage.Clie
 		logger.Fatal("ensure bucket failed", zap.Error(err))
 	}
 	return storageClient
+}
+
+func handleAssembly(logger *zap.Logger, uc *usecase.AssemblerUseCase) queue.HandlerFunc {
+	return func(ctx context.Context, msg kafka.Message) error {
+		var event domain.StreamEndedEvent
+		if err := json.Unmarshal(msg.Value, &event); err != nil {
+			return fmt.Errorf("unmarshal stream ended for assembly: %w", err)
+		}
+		return uc.Assemble(ctx, event)
+	}
 }

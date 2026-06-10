@@ -97,7 +97,7 @@ func (u *StreamUseCase) PublishFrame(ctx context.Context, roomID, participantID,
 	return nil
 }
 
-func (u *StreamUseCase) NotifyStreamEnded(ctx context.Context, roomID, participantID, streamID, streamType, recordingURL string, durationSecs int64) error {
+func (u *StreamUseCase) NotifyStreamEnded(ctx context.Context, roomID, participantID, streamID, streamType string, segmentKeys []string, durationSecs int64) error {
 	// peer đóng -> unregister
 	if err := u.sessions.Unregister(ctx, roomID, participantID, streamType); err != nil {
 		u.logger.Warn("session unregister failed", 
@@ -111,7 +111,7 @@ func (u *StreamUseCase) NotifyStreamEnded(ctx context.Context, roomID, participa
 		ParticipantID: participantID,
 		StreamID:      streamID,
 		StreamType:    streamType,
-		RecordingURL:  recordingURL,
+		SegmentKeys:  segmentKeys,
 		Duration:      durationSecs,
 		EndedAt:       time.Now().UTC(),
 	}
@@ -122,7 +122,7 @@ func (u *StreamUseCase) NotifyStreamEnded(ctx context.Context, roomID, participa
 
 	u.logger.Info("stream ended event published",
 		zap.String("stream_id", streamID),
-		zap.String("recording_url", recordingURL),
+		zap.Int("segment_count", len(segmentKeys)),
 		zap.Int64("duration_secs", durationSecs),
 	)
 

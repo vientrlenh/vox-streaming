@@ -133,6 +133,118 @@ func (x *ValidateAccessResponse) GetReason() string {
 	return ""
 }
 
+type UpdateRecordingRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	StreamId      string                 `protobuf:"bytes,1,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
+	RoomId        string                 `protobuf:"bytes,2,opt,name=room_id,json=roomId,proto3" json:"room_id,omitempty"`
+	RecordingUrl  string                 `protobuf:"bytes,3,opt,name=recording_url,json=recordingUrl,proto3" json:"recording_url,omitempty"`
+	DurationSecs  int64                  `protobuf:"varint,4,opt,name=duration_secs,json=durationSecs,proto3" json:"duration_secs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateRecordingRequest) Reset() {
+	*x = UpdateRecordingRequest{}
+	mi := &file_exam_v1_exam_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateRecordingRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateRecordingRequest) ProtoMessage() {}
+
+func (x *UpdateRecordingRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_exam_v1_exam_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateRecordingRequest.ProtoReflect.Descriptor instead.
+func (*UpdateRecordingRequest) Descriptor() ([]byte, []int) {
+	return file_exam_v1_exam_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *UpdateRecordingRequest) GetStreamId() string {
+	if x != nil {
+		return x.StreamId
+	}
+	return ""
+}
+
+func (x *UpdateRecordingRequest) GetRoomId() string {
+	if x != nil {
+		return x.RoomId
+	}
+	return ""
+}
+
+func (x *UpdateRecordingRequest) GetRecordingUrl() string {
+	if x != nil {
+		return x.RecordingUrl
+	}
+	return ""
+}
+
+func (x *UpdateRecordingRequest) GetDurationSecs() int64 {
+	if x != nil {
+		return x.DurationSecs
+	}
+	return 0
+}
+
+type UpdateRecordingResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateRecordingResponse) Reset() {
+	*x = UpdateRecordingResponse{}
+	mi := &file_exam_v1_exam_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateRecordingResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateRecordingResponse) ProtoMessage() {}
+
+func (x *UpdateRecordingResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_exam_v1_exam_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateRecordingResponse.ProtoReflect.Descriptor instead.
+func (*UpdateRecordingResponse) Descriptor() ([]byte, []int) {
+	return file_exam_v1_exam_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *UpdateRecordingResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
 var File_exam_v1_exam_proto protoreflect.FileDescriptor
 
 const file_exam_v1_exam_proto_rawDesc = "" +
@@ -145,9 +257,17 @@ const file_exam_v1_exam_proto_rawDesc = "" +
 	"streamType\"J\n" +
 	"\x16ValidateAccessResponse\x12\x18\n" +
 	"\aallowed\x18\x01 \x01(\bR\aallowed\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason2`\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"\x98\x01\n" +
+	"\x16UpdateRecordingRequest\x12\x1b\n" +
+	"\tstream_id\x18\x01 \x01(\tR\bstreamId\x12\x17\n" +
+	"\aroom_id\x18\x02 \x01(\tR\x06roomId\x12#\n" +
+	"\rrecording_url\x18\x03 \x01(\tR\frecordingUrl\x12#\n" +
+	"\rduration_secs\x18\x04 \x01(\x03R\fdurationSecs\"3\n" +
+	"\x17UpdateRecordingResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess2\xb6\x01\n" +
 	"\vExamService\x12Q\n" +
-	"\x0eValidateAccess\x12\x1e.exam.v1.ValidateAccessRequest\x1a\x1f.exam.v1.ValidateAccessResponseB\x17Z\x15pkg/pb/exam/v1;examv1b\x06proto3"
+	"\x0eValidateAccess\x12\x1e.exam.v1.ValidateAccessRequest\x1a\x1f.exam.v1.ValidateAccessResponse\x12T\n" +
+	"\x0fUpdateRecording\x12\x1f.exam.v1.UpdateRecordingRequest\x1a .exam.v1.UpdateRecordingResponseB\x17Z\x15pkg/pb/exam/v1;examv1b\x06proto3"
 
 var (
 	file_exam_v1_exam_proto_rawDescOnce sync.Once
@@ -161,16 +281,20 @@ func file_exam_v1_exam_proto_rawDescGZIP() []byte {
 	return file_exam_v1_exam_proto_rawDescData
 }
 
-var file_exam_v1_exam_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_exam_v1_exam_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_exam_v1_exam_proto_goTypes = []any{
-	(*ValidateAccessRequest)(nil),  // 0: exam.v1.ValidateAccessRequest
-	(*ValidateAccessResponse)(nil), // 1: exam.v1.ValidateAccessResponse
+	(*ValidateAccessRequest)(nil),   // 0: exam.v1.ValidateAccessRequest
+	(*ValidateAccessResponse)(nil),  // 1: exam.v1.ValidateAccessResponse
+	(*UpdateRecordingRequest)(nil),  // 2: exam.v1.UpdateRecordingRequest
+	(*UpdateRecordingResponse)(nil), // 3: exam.v1.UpdateRecordingResponse
 }
 var file_exam_v1_exam_proto_depIdxs = []int32{
 	0, // 0: exam.v1.ExamService.ValidateAccess:input_type -> exam.v1.ValidateAccessRequest
-	1, // 1: exam.v1.ExamService.ValidateAccess:output_type -> exam.v1.ValidateAccessResponse
-	1, // [1:2] is the sub-list for method output_type
-	0, // [0:1] is the sub-list for method input_type
+	2, // 1: exam.v1.ExamService.UpdateRecording:input_type -> exam.v1.UpdateRecordingRequest
+	1, // 2: exam.v1.ExamService.ValidateAccess:output_type -> exam.v1.ValidateAccessResponse
+	3, // 3: exam.v1.ExamService.UpdateRecording:output_type -> exam.v1.UpdateRecordingResponse
+	2, // [2:4] is the sub-list for method output_type
+	0, // [0:2] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -187,7 +311,7 @@ func file_exam_v1_exam_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_exam_v1_exam_proto_rawDesc), len(file_exam_v1_exam_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

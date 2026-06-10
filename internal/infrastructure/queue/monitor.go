@@ -60,6 +60,11 @@ var (
 	}, []string{"topic", "group_id", "reason"})
 )
 
+type ConsumerKey struct {
+	Topic string
+	GroupID string
+}
+
 type AlertConfig struct {
 	LagThreshold int64
 	LagDuration  time.Duration
@@ -68,7 +73,7 @@ type AlertConfig struct {
 
 var DefaultAlertConfigs = map[string]AlertConfig{
 	domain.TopicFrameReady: {
-		LagThreshold: 1000, // đang chờ 1000 frame
+		LagThreshold: 1000, // waiting 1000 frames
 		LagDuration:  2 * time.Minute,
 		DLQThreshold: 50,
 	},
@@ -78,15 +83,28 @@ var DefaultAlertConfigs = map[string]AlertConfig{
 		DLQThreshold: 5,
 	},
 	domain.TopicStreamEnded: {
-		LagThreshold: 20,
+		LagThreshold: 20, // assembler processing, higher lag throughput
 		LagDuration:  1 * time.Minute,
-		DLQThreshold: 5,
+		DLQThreshold: 3,
 	},
 	domain.TopicRoomClosed: {
 		LagThreshold: 5,
 		LagDuration:  30 * time.Second,
-		DLQThreshold: 1, // thông báo cho tất cả mọi DLQ
+		DLQThreshold: 1, // alert to all
 	},
+}
+
+func BuildAlertConfigs(consumers []*Consumer, defaults map[string]AlertConfig, overrides map[ConsumerKey]AlertConfig) map[ConsumerKey]AlertConfig {
+	result := make(map[ConsumerKey]AlertConfig)
+	for _, c := range consumers {
+		key := ConsumerKey{Topic: c.topic, GroupID: c.groupID}
+		if override, ok := overrides[key]; ok {
+			result[key] = override
+		} else if def, ok := defaults[c.topic]; ok {
+			result[key] = def
+		}
+	}
+	return result
 }
 
 type AlertFunc func(alert Alert)
@@ -111,23 +129,21 @@ const (
 type Monitor struct {
 	consumers    []*Consumer
 	dlqWriter    *DLQWriter
-	alertConfigs map[string]AlertConfig
+	alertConfigs map[ConsumerKey]AlertConfig
 	alertFn      AlertFunc
-	groupID      string
 	logger       *zap.Logger
 
-	lagExceededSince map[string]time.Time
+	lagExceededSince map[ConsumerKey]time.Time
 	mu               sync.Mutex
 
-	dlqCountSnapshot map[string]int64
+	dlqCountSnapshot map[ConsumerKey]int64
 }
 
 func NewMonitor(
 	consumers []*Consumer,
 	dlqWriter *DLQWriter,
-	alertConfigs map[string]AlertConfig,
+	alertConfigs map[ConsumerKey]AlertConfig,
 	alertFn AlertFunc,
-	groupID string,
 	logger *zap.Logger,
 ) *Monitor {
 	return &Monitor{
@@ -135,11 +151,11 @@ func NewMonitor(
 		dlqWriter:    dlqWriter,
 		alertConfigs: alertConfigs,
 		alertFn:      alertFn,
-		groupID:      groupID,
 		logger:       logger,
 
-		lagExceededSince: make(map[string]time.Time),
-		dlqCountSnapshot: make(map[string]int64),
+		lagExceededSince: make(map[ConsumerKey]time.Time),
+		dlqCountSnapshot: make(map[ConsumerKey]int64),
+
 	}
 }
 
@@ -163,18 +179,19 @@ func (m *Monitor) Run(ctx context.Context) {
 func (m *Monitor) collect() {
 	for _, consumer := range m.consumers {
 		stats := consumer.Stats()
-		m.processStats(stats)
+		m.processStats(stats, consumer.groupID)
 	}
 }
 
-func (m *Monitor) processStats(stats kafka.ReaderStats) {
+func (m *Monitor) processStats(stats kafka.ReaderStats, groupID string) {
 	topic := stats.Topic
-	groupID := m.groupID
 
+	key := ConsumerKey{Topic: topic, GroupID: groupID}
 	metricConsumerLag.WithLabelValues(topic, groupID).Set(float64(stats.Lag))
 
 	m.logger.Debug("kafka consumer stats",
-		zap.String("topic", topic),
+		zap.String("topic", topic), 
+		zap.String("group_id", groupID),
 		zap.Int64("lag", stats.Lag),
 		zap.Int64("messages", stats.Messages),
 		zap.Int64("fetch_errors", stats.Errors),
@@ -183,7 +200,7 @@ func (m *Monitor) processStats(stats kafka.ReaderStats) {
 		zap.Int64("bytes_read", stats.Bytes),
 	)
 
-	alertCfg, hasAlert := m.alertConfigs[topic]
+	alertCfg, hasAlert := m.alertConfigs[key]
 	if !hasAlert {
 		return
 	}
@@ -195,10 +212,14 @@ func (m *Monitor) checkLagAlert(topic, groupID string, lag int64, cfg AlertConfi
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	key := ConsumerKey {
+		Topic: topic, 
+		GroupID: groupID,
+	}
 	if lag > cfg.LagThreshold {
-		if since, alreadyExceeded := m.lagExceededSince[topic]; !alreadyExceeded {
+		if since, alreadyExceeded := m.lagExceededSince[key]; !alreadyExceeded {
 			// lag bắt đầu vượt ngưỡng -> ghi lại thời điểm
-			m.lagExceededSince[topic] = time.Now()
+			m.lagExceededSince[key] = time.Now()
 			m.logger.Warn("kafka lag exceeded threshold",
 				zap.String("topic", topic),
 				zap.Int64("lag", lag),
@@ -218,10 +239,11 @@ func (m *Monitor) checkLagAlert(topic, groupID string, lag int64, cfg AlertConfi
 				Threshold: cfg.LagThreshold,
 				At:        time.Now(),
 			})
+			m.lagExceededSince[key] = time.Now() // start to count lag duration
 		}
 	} else {
-		if _, wasExceeded := m.lagExceededSince[topic]; wasExceeded {
-			delete(m.lagExceededSince, topic)
+		if _, wasExceeded := m.lagExceededSince[key]; wasExceeded {
+			delete(m.lagExceededSince, key)
 			m.logger.Info("kafka lag recovered",
 				zap.String("topic", topic),
 				zap.Int64("lag", lag),
@@ -239,15 +261,17 @@ func (m *Monitor) RecordProcessing(topic, groupID string, duration time.Duration
 }
 
 func (m *Monitor) RecordDLQ(topic, groupID, reason string, writeDuration time.Duration) {
+	key := ConsumerKey {Topic: topic, GroupID: groupID}
+
 	metricDLQMessage.WithLabelValues(topic, groupID, reason).Inc()
 	metricDLQWriteDuration.WithLabelValues(topic, groupID, reason).Observe(writeDuration.Seconds())
 
 	m.mu.Lock()
-	m.dlqCountSnapshot[topic]++
-	count := m.dlqCountSnapshot[topic]
+	m.dlqCountSnapshot[key]++
+	count := m.dlqCountSnapshot[key]
 	m.mu.Unlock()
 
-	alertCfg, hasAlert := m.alertConfigs[topic]
+	alertCfg, hasAlert := m.alertConfigs[key]
 	if !hasAlert {
 		return
 	}
@@ -264,7 +288,7 @@ func (m *Monitor) RecordDLQ(topic, groupID, reason string, writeDuration time.Du
 		})
 
 		m.mu.Lock()
-		m.dlqCountSnapshot[topic] = 0
+		m.dlqCountSnapshot[key] = 0
 		m.mu.Unlock()
 	}
 }
