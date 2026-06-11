@@ -27,6 +27,7 @@ const (
 type PeerConfig struct {
 	ICEServers    []webrtc.ICEServer
 	FrameInterval time.Duration
+	TempDir       string
 }
 
 type Peer struct {
@@ -143,7 +144,7 @@ func NewPeer(
 	}
 	p.closedByFailure.Store(false)
 	if storage != nil {
-		rec, err := recorder.NewSegmentedRecorder(roomID, streamID, storage, logger)
+		rec, err := recorder.NewSegmentedRecorder(roomID, streamID, cfg.TempDir, storage, logger)
 		if err != nil {
 			logger.Warn("recorder init failed, recording disabled", zap.Error(err))
 		} else {
@@ -234,8 +235,8 @@ func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
 
 	// tier 2: wire NALSink into recorder
 	if p.recorder != nil {
-		fe.SetNALSink(func(nals [][]byte, hasIDR bool) {
-			p.recorder.WriteVideoNALs(nals, hasIDR)
+		fe.SetNALSink(func(nals [][]byte, hasIDR bool, dur uint32) {
+			p.recorder.WriteVideoNALs(nals, hasIDR, dur)
 		})
 	}
 	
@@ -250,6 +251,7 @@ func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
 		cancel() // track error -> stop ticker
 	}()
 
+	var capturing atomic.Bool
 	ticker := time.NewTicker(p.frameInterval)
 	defer ticker.Stop()
 
@@ -258,16 +260,23 @@ func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			seq := p.frameSeq.Add(1)
-			frameURL := p.captureAndUpload(ctx, fe, seq)
-			if err := p.streamUseCase.PublishFrame(
-				ctx, p.roomID, p.participantID, p.streamID, p.streamType, frameURL, seq,
-			); err != nil {
-				p.logger.Warn("publish frame failed", 
-					zap.Int64("seq", seq), 
-					zap.Error(err),
-				)
+			if !capturing.CompareAndSwap(false, true) {
+				p.logger.Debug("frame capture skipped: previous capture still in progress")
+				continue
 			}
+			seq := p.frameSeq.Add(1)
+			go func(s int64) {
+				defer capturing.Store(false)
+				frameURL := p.captureAndUpload(ctx, fe, s)
+				if err := p.streamUseCase.PublishFrame(
+					ctx, p.roomID, p.participantID, p.streamID, p.streamType, frameURL, s,
+				); err != nil {
+					p.logger.Warn("publish frame failed",
+						zap.Int64("seq", s),
+						zap.Error(err),
+					)
+				}
+			}(seq)
 		}
 	}
 }

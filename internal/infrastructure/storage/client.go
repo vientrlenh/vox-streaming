@@ -162,8 +162,8 @@ func (c *Client) PresignRecording(ctx context.Context, key string, expiry time.D
 	return req.URL, nil
 }
 
-// padding 10 chữ số -> sort lexicographic đúng thứ tự cho playback review
-// rooms/{roomID}/streams/{streamID}/{seq:010d}.jpg
+
+// rooms/{roomID}/streams/{streamID}/{seq:010d}.264
 func frameKey(roomID, streamID string, seq int64) string {
 	return fmt.Sprintf("rooms/%s/streams/%s/%010d.264", roomID, streamID, seq)
 }
@@ -237,6 +237,20 @@ func (c *Client) RecordingExists(ctx context.Context, roomID, streamID string) (
 		return false, fmt.Errorf("check recording existence: %w", err)
 	}
 	return true, nil
+}
+
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.s3.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(c.cfg.FrameBucket),
+	})
+	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "403" {
+			return nil // bucket exists but creds have no list perm — storage is reachable
+		}
+		return err
+	}
+	return nil
 }
 
 func (c *Client) DownloadSegmentToFile(ctx context.Context, key, dstPath string) error {

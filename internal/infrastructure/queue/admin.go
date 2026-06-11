@@ -138,13 +138,26 @@ func WaitForKafka(ctx context.Context, cfg Config, brokers []string, logger *zap
 }
 
 
+// PingKafka dials the first broker to verify Kafka is reachable.
+func PingKafka(ctx context.Context, cfg Config, brokers []string) error {
+	if len(brokers) == 0 {
+		return fmt.Errorf("no brokers configured")
+	}
+	conn, err := dialer(cfg).DialContext(ctx, "tcp", brokers[0])
+	if err != nil {
+		return err
+	}
+	conn.Close()
+	return nil
+}
+
 func isTopicExistsError(err error) bool {
 	return strings.Contains(err.Error(), "Topic with this name already exists")
 }
 
 func dialer(cfg Config) *kafka.Dialer {
 	dialer := &kafka.Dialer{}
-	if cfg.TLSEnabled || cfg.SASLUser != "" {
+	if cfg.TLSEnabled && cfg.SASLUser != "" && cfg.SASLPass != "" {
 		mechanism, _ := scram.Mechanism(scram.SHA256, cfg.SASLUser, cfg.SASLPass)
 		dialer = &kafka.Dialer{
 			SASLMechanism: mechanism, 

@@ -26,6 +26,12 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 		domain.TopicRoomClosed,
 	}
 
+	// frame events are high-volume and loss-tolerant — async is fine
+	// stream lifecycle events carry segment keys used by assembler — must always be sync
+	asyncAllowed := map[string]bool{
+		domain.TopicFrameReady: true,
+	}
+
 	writers := make(map[string]*kafka.Writer, len(topics))
 
 	for _, topic := range topics {
@@ -33,17 +39,18 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 		if cfg.TLSEnabled || cfg.SASLUser != "" {
 			mechanism, _ := scram.Mechanism(scram.SHA256, cfg.SASLUser, cfg.SASLPass)
 			transport = &kafka.Transport{
-				SASL: mechanism, 
-				TLS: &tls.Config{},
+				SASL: mechanism,
+				TLS:  &tls.Config{},
 			}
 		}
+		async := cfg.Async && asyncAllowed[topic]
 		w := &kafka.Writer{
 			Addr:         kafka.TCP(cfg.Brokers...),
 			Topic:        topic,
 			Balancer:     &kafka.Hash{}, // đảm bảo ordering per room khi cùng room ID và cùng partition
 			BatchSize:    cfg.BatchSize,
 			BatchTimeout: cfg.BatchTimeout,
-			Async:        cfg.Async,
+			Async:        async,
 			RequiredAcks: kafka.RequiredAcks(cfg.RequiredAcks),
 			MaxAttempts:  5,
 			Compression:  kafka.Snappy,
@@ -57,7 +64,10 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 		}
 
 		writers[topic] = w
-		logger.Info("kafka writer initialized", zap.String("topic", topic))
+		logger.Info("kafka writer initialized",
+			zap.String("topic", topic),
+			zap.Bool("async", async),
+		)
 	}
 	return &Publisher{
 		writers: writers,

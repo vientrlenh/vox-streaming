@@ -42,8 +42,8 @@ type segmentWriter struct {
 	audioDTS uint64
 }
 
-func newSegmentWriter() (*segmentWriter, error) {
-	f, err := os.CreateTemp("", "vox-segment-video-*.mp4")
+func newSegmentWriter(tempDir string) (*segmentWriter, error) {
+	f, err := os.CreateTemp(tempDir, "vox-segment-video-*.mp4")
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +59,7 @@ func newSegmentWriter() (*segmentWriter, error) {
 // buffer a picture into the current GDP
 // On a new IDR, the previous GOP is flushed as one moof+mdat fragment first
 // hasIDR must be true when nals contains an IDR frame (type 5)
-func (sw *segmentWriter) writeVideo(nals [][]byte, hasIDR bool) error {
+func (sw *segmentWriter) writeVideo(nals [][]byte, hasIDR bool, dur uint32) error {
 	// Extract SPS/PPS whenever they appear (typically in every IDR picture)
 	for _, nal := range nals {
 		if len(nal) == 0 {
@@ -101,7 +101,7 @@ func (sw *segmentWriter) writeVideo(nals [][]byte, hasIDR bool) error {
 	}
 	sw.gopVideo = append(sw.gopVideo, fragSample{
 		data:  avcc,
-		dur:   defaultFrameDur,
+		dur:   dur,
 		isKey: hasIDR,
 	})
 	return nil
@@ -167,6 +167,7 @@ func (sw *segmentWriter) discard() {
 type SegmentedRecorder struct {
 	roomID   string
 	streamID string
+	tempDir  string
 	storage  *storage.Client
 	logger   *zap.Logger
 
@@ -186,14 +187,15 @@ type SegmentedRecorder struct {
 	rotateCh chan struct{}
 }
 
-func NewSegmentedRecorder(roomID, streamID string, storage *storage.Client, logger *zap.Logger) (*SegmentedRecorder, error) {
-	first, err := newSegmentWriter()
+func NewSegmentedRecorder(roomID, streamID, tempDir string, storage *storage.Client, logger *zap.Logger) (*SegmentedRecorder, error) {
+	first, err := newSegmentWriter(tempDir)
 	if err != nil {
 		return nil, fmt.Errorf("init first segment: %w", err)
 	}
 	r := &SegmentedRecorder{
 		roomID:          roomID,
 		streamID:        streamID,
+		tempDir:         tempDir,
 		storage:         storage,
 		logger:          logger,
 		segmentDuration: defaultSegmentDuration,
@@ -228,7 +230,7 @@ func (r *SegmentedRecorder) rotateSegment() {
 	r.segmentSeq++
 	endedAt := time.Now().UTC()
 
-	next, err := newSegmentWriter()
+	next, err := newSegmentWriter(r.tempDir)
 	if err != nil {
 		r.logger.Warn("start next segment failed, keeping current", zap.Error(err))
 		r.mu.Unlock()
@@ -246,10 +248,7 @@ func (r *SegmentedRecorder) finalizeAndUpload(ctx context.Context, sw *segmentWr
 	startedAt := sw.startedAt
 	tmpPath, err := sw.closeAndFinalize()
 	if err != nil {
-		r.logger.Warn("segment finalize failed",
-			zap.Int64("seq", seq),
-			zap.Error(err),
-		)
+		r.logger.Warn("segment finalize failed", zap.Int64("seq", seq), zap.Error(err))
 		return
 	}
 	if tmpPath == "" {
@@ -257,19 +256,9 @@ func (r *SegmentedRecorder) finalizeAndUpload(ctx context.Context, sw *segmentWr
 	}
 	defer os.Remove(tmpPath)
 
-	f, err := os.Open(tmpPath)
+	s3Key, err := r.uploadWithRetry(ctx, tmpPath, seq)
 	if err != nil {
-		r.logger.Warn("open segment for upload failed",
-			zap.Int64("seq", seq),
-			zap.Error(err),
-		)
-		return
-	}
-	defer f.Close()
-
-	s3Key, err := r.storage.UploadServerSegment(ctx, r.roomID, r.streamID, seq, f)
-	if err != nil {
-		r.logger.Warn("segment upload failed",
+		r.logger.Error("segment upload failed permanently",
 			zap.Int64("seq", seq),
 			zap.Error(err),
 		)
@@ -292,16 +281,49 @@ func (r *SegmentedRecorder) finalizeAndUpload(ctx context.Context, sw *segmentWr
 	)
 }
 
+const segmentUploadMaxAttempts = 3
+
+func (r *SegmentedRecorder) uploadWithRetry(ctx context.Context, tmpPath string, seq int64) (string, error) {
+	var lastErr error
+	for attempt := range segmentUploadMaxAttempts {
+		if attempt > 0 {
+			delay := time.Duration(attempt) * 2 * time.Second // 2s, 4s
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		f, err := os.Open(tmpPath)
+		if err != nil {
+			return "", fmt.Errorf("open segment: %w", err)
+		}
+		key, err := r.storage.UploadServerSegment(ctx, r.roomID, r.streamID, seq, f)
+		f.Close()
+		if err == nil {
+			return key, nil
+		}
+		lastErr = err
+		r.logger.Warn("segment upload attempt failed",
+			zap.Int64("seq", seq),
+			zap.Int("attempt", attempt+1),
+			zap.Error(err),
+		)
+	}
+	return "", fmt.Errorf("upload failed after %d attempts: %w", segmentUploadMaxAttempts, lastErr)
+}
+
 // receives all NAL units of one complete picture
 // hasIDR must be true when nals contain an IDR frame
-func (r *SegmentedRecorder) WriteVideoNALs(nals [][]byte, hasIDR bool) {
+func (r *SegmentedRecorder) WriteVideoNALs(nals [][]byte, hasIDR bool, dur uint32) {
 	r.mu.Lock()
 	if r.current == nil {
 		r.mu.Unlock()
 		return
 	}
 	r.hasVideo = true
-	err := r.current.writeVideo(nals, hasIDR)
+	err := r.current.writeVideo(nals, hasIDR, dur)
 	r.mu.Unlock()
 
 	if err != nil {

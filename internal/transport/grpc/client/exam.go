@@ -9,6 +9,7 @@ import (
 	"github.com/vientrlenh/vox-streaming/pkg/auth"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -20,8 +21,9 @@ type ExamClientConfig struct {
 }
 
 type ExamClient struct {
-	conn *grpc.ClientConn
+	conn   *grpc.ClientConn
 	client examv1.ExamServiceClient
+	addr   string
 	logger *zap.Logger
 }
 
@@ -52,10 +54,24 @@ func NewExamClient(cfg ExamClientConfig, logger *zap.Logger) (*ExamClient, error
 		return nil, err
 	}
 	return &ExamClient{
-		conn: conn, 
+		conn:   conn,
 		client: examv1.NewExamServiceClient(conn),
+		addr:   cfg.Addr,
 		logger: logger,
 	}, nil
+}
+
+func (c *ExamClient) Addr() string { return c.addr }
+
+// Ping reports an error if the underlying gRPC connection has entered a failed state.
+// gRPC connections are lazy, so Idle/Connecting/Ready all indicate healthy.
+func (c *ExamClient) Ping(_ context.Context) error {
+	switch state := c.conn.GetState(); state {
+	case connectivity.TransientFailure, connectivity.Shutdown:
+		return fmt.Errorf("connection state: %s", state)
+	default:
+		return nil
+	}
 }
 
 func (c *ExamClient) ValidateAccess(ctx context.Context, roomID, participantID, streamType string) (allowed bool, reason string, err error) {

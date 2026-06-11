@@ -30,7 +30,8 @@ type fuaBuf struct {
 
 // receive all NAL units each completed picture
 // hasIDR = true if picture contains IDR frame
-type NALSink func(nals [][]byte, hasIDR bool)
+// dur is the picture duration in 90kHz ticks derived from RTP timestamps
+type NALSink func(nals [][]byte, hasIDR bool, dur uint32)
 
 type FrameExtractor struct {
 	track *webrtc.TrackRemote
@@ -45,8 +46,11 @@ type FrameExtractor struct {
 
 	idrCh chan struct{} // được thông báo khi có một IDR frame được buffer
 
-	fua *fuaBuf // FU-A reassembly 
-	picBuf [][]byte // NALs accumulating for the current RTP picture
+	fua *fuaBuf // FU-A reassembly
+	picBuf  [][]byte // NALs accumulating for the current RTP picture
+	picTS   uint32   // RTP timestamp of the picture being assembled
+	prevTS  uint32   // RTP timestamp of the previous committed picture
+	hasFirstPic bool
 	sink NALSink // optional, called for every complete picture
 }
 
@@ -80,7 +84,7 @@ func (fe *FrameExtractor) RequestKeyFrame() {
 }
 
 func (fe *FrameExtractor) ReadLoop(ctx context.Context) {
-	buf := make([]byte, 1500) // MTU-sized
+	buf := make([]byte, 4096) // MTU-sized
 	for {
 		select {
 		case<-ctx.Done():
@@ -100,6 +104,7 @@ func (fe *FrameExtractor) ReadLoop(ctx context.Context) {
 }
 
 func (fe *FrameExtractor) ingest(pkt *rtp.Packet) {
+	fe.picTS = pkt.Timestamp
 	p := pkt.Payload
 	if len(p) == 0 {
 		return
@@ -181,6 +186,18 @@ func (fe *FrameExtractor) commitPicture() {
 	if len(fe.picBuf) == 0 {
 		return
 	}
+
+	// derive duration from consecutive RTP timestamps (90kHz clock)
+	// fallback to defaultFrameDur (30fps) when no prior timestamp or value looks wrong
+	dur := defaultFrameDur
+	if fe.hasFirstPic {
+		if d := fe.picTS - fe.prevTS; d > 0 && d < 900000 { // sanity: < 10s at 90kHz
+			dur = d
+		}
+	}
+	fe.prevTS = fe.picTS
+	fe.hasFirstPic = true
+
 	hasIDR := false
 	for _, n := range fe.picBuf {
 		if len(n) > 0 && n[0]&0x1F == nalTypeIDR {
@@ -191,7 +208,7 @@ func (fe *FrameExtractor) commitPicture() {
 
 	// tier 2: send all NAL units to recorder (IDR and non-IDR)
 	if fe.sink != nil {
-		fe.sink(fe.picBuf, hasIDR)
+		fe.sink(fe.picBuf, hasIDR, dur)
 	}
 
 	// tier 1: only buffer IDR for keyframe capture

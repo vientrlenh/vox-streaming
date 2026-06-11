@@ -9,12 +9,17 @@ import (
 )
 
 
-func RunMetric(logger *zap.Logger) {
+func RunMetric(hc *HealthChecker, logger *zap.Logger) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+
+	// liveness: process is alive
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+
+	// readiness: all upstream dependencies are reachable
+	mux.HandleFunc("GET /readyz", hc.ServeReadyz)
 
 	metricAddr := os.Getenv("METRIC_ADDR")
 	if metricAddr == "" {

@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
 	pwebrtc "github.com/pion/webrtc/v4"
 	"github.com/segmentio/kafka-go"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
@@ -28,13 +29,18 @@ import (
 	"go.uber.org/zap"
 )
 
-func main() {
+func main() { 
 	logger, _ := zap.NewProduction()
 	defer logger.Sync()
 
+	err := godotenv.Load()
+	if err != nil {
+		logger.Fatal("error loading env file")
+	}
+
 	brokers := os.Getenv("KAFKA_BROKERS")
 	if brokers == "" {
-		brokers = "kafka:9092"
+		brokers = "localhost:9092"
 	}
 	groupID := os.Getenv("KAFKA_CONSUMER_GROUP")
 	if groupID == "" {
@@ -43,14 +49,13 @@ func main() {
 
 	kafkaCfg := queue.NewConfig(
 		queue.DefaultConfig(
-			strings.Split(brokers, ","), 
+			strings.Split(brokers, ","),
 			groupID,
 		),
 		os.Getenv("KAFKA_TLS_ENABLED") == "true",
-		os.Getenv("KAFKA_USERNAME"), 
+		os.Getenv("KAFKA_USERNAME"),
 		os.Getenv("KAFKA_PASSWORD"),
 	)
-
 
 	startupCtx, startupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer startupCancel()
@@ -67,7 +72,7 @@ func main() {
 	if err != nil {
 		logger.Fatal("publisher init failed", zap.Error(err))
 	}
-	
+
 	iceServers := buildICEServers()
 	frameIntervalSecs, _ := strconv.Atoi(os.Getenv("FRAME_INTERVAL_SECS"))
 	if frameIntervalSecs == 0 {
@@ -103,20 +108,20 @@ func main() {
 	}
 
 	grpcServer, err := grpctransport.NewServer(grpctransport.ServerConfig{
-		Addr: grpcAddr,
+		Addr:     grpcAddr,
 		CertFile: os.Getenv("GRPC_CERT_FILE"),
-		KeyFile: os.Getenv("GRPC_KEY_FILE"),
-		CAFile: os.Getenv("GRPC_CA_FILE"),
-		APIKey: os.Getenv("GRPC_SERVICE_TOKEN"),
+		KeyFile:  os.Getenv("GRPC_KEY_FILE"),
+		CAFile:   os.Getenv("GRPC_CA_FILE"),
+		APIKey:   os.Getenv("GRPC_SERVICE_TOKEN"),
 	}, alertServer, logger)
 	if err != nil {
 		logger.Fatal("grpc server create failed", zap.Error(err))
 	}
 
 	examClient, err := grpcclient.NewExamClient(grpcclient.ExamClientConfig{
-		Addr: os.Getenv("EXAM_SERVICE_GRPC_ADDR"),
+		Addr:   os.Getenv("EXAM_SERVICE_GRPC_ADDR"),
 		CAFile: os.Getenv("EXAM_SERVICE_CA_FILE"),
-		Token: os.Getenv("GRPC_SERVICE_TOKEN"),
+		Token:  os.Getenv("GRPC_SERVICE_TOKEN"),
 	}, logger)
 	if err != nil {
 		logger.Fatal("grpc exam client create failed", zap.Error(err))
@@ -136,10 +141,11 @@ func main() {
 
 	webrtcHandler := webrtctransport.NewHandler(
 		webrtctransport.PeerConfig{
-			ICEServers: iceServers,
-			FrameInterval: time.Duration(frameIntervalSecs) * time.Second, 
+			ICEServers:    iceServers,
+			FrameInterval: time.Duration(frameIntervalSecs) * time.Second,
+			TempDir:       os.Getenv("SEGMENT_TEMP_DIR"),
 		},
-		streamUseCase, 
+		streamUseCase,
 		monitorUseCase,
 		allowedOrigins,
 		logger,
@@ -165,9 +171,9 @@ func main() {
 	}()
 
 	mainTopics := []string{
-		domain.TopicFrameReady, 
-		domain.TopicStreamStarted, 
-		domain.TopicStreamEnded, 
+		domain.TopicFrameReady,
+		domain.TopicStreamStarted,
+		domain.TopicStreamEnded,
 		domain.TopicRoomClosed,
 	}
 
@@ -177,10 +183,10 @@ func main() {
 	}
 
 	slackWebhook := os.Getenv("SLACK_WEBHOOK_URL")
-	var alertFn queue.AlertFunc 
+	var alertFn queue.AlertFunc
 	if slackWebhook != "" {
 		alertFn = queue.ChainAlert(
-			queue.LogOnlyAlert(logger), 
+			queue.LogOnlyAlert(logger),
 			queue.SlackAlert(slackWebhook, logger),
 		)
 	} else {
@@ -188,77 +194,77 @@ func main() {
 	}
 
 	frameConsumer := queue.NewConsumer(
-		kafkaCfg, 
-		domain.TopicFrameReady, 
-		handleFrameReady(logger, broadCaster), 
-		logger, 
+		kafkaCfg,
+		domain.TopicFrameReady,
+		handleFrameReady(logger, broadCaster),
+		logger,
 		&queue.ConsumerOptions{
-			MaxRetries: 3, 
-			RetryDelay: 500 * time.Millisecond, 
-			DLQ: dlqWriter,
+			MaxRetries:         3,
+			RetryDelay:         500 * time.Millisecond,
+			DLQ:                dlqWriter,
 			CommitOnDLQFailure: true, // frame mất không bị ảnh hưởng
-			MaxDLQFails: 0,
+			MaxDLQFails:        0,
 		},
 	)
 
 	streamStartedConsumer := queue.NewConsumer(
-		kafkaCfg, 
-		domain.TopicStreamStarted, 
-		handleStreamStarted(logger, monitorUseCase), 
-		logger, 
+		kafkaCfg,
+		domain.TopicStreamStarted,
+		handleStreamStarted(logger, monitorUseCase),
+		logger,
 		&queue.ConsumerOptions{
-			MaxRetries: 5, 
-			RetryDelay: time.Second,
-			DLQ: dlqWriter,
+			MaxRetries:         5,
+			RetryDelay:         time.Second,
+			DLQ:                dlqWriter,
 			CommitOnDLQFailure: false,
-			MaxDLQFails: 10,
+			MaxDLQFails:        10,
 		},
 	)
 	streamEndedConsumer := queue.NewConsumer(
-		kafkaCfg, 
-		domain.TopicStreamEnded, 
+		kafkaCfg,
+		domain.TopicStreamEnded,
 		handleStreamEnded(logger, monitorUseCase),
-		logger, 
+		logger,
 		&queue.ConsumerOptions{
-			MaxRetries: 5, 
-			RetryDelay: time.Second, 
-			DLQ: dlqWriter, 
+			MaxRetries:         5,
+			RetryDelay:         time.Second,
+			DLQ:                dlqWriter,
 			CommitOnDLQFailure: false,
-			MaxDLQFails: 10,
+			MaxDLQFails:        10,
 		},
 	)
 
 	assemblerKafkaCfg := kafkaCfg
 	assemblerKafkaCfg.GroupID = "vox-assembler"
-	
+
 	assemblerUseCase := usecase.NewAssemblerUseCase(storageClient, examClient, logger)
 	assemblerConsumer := queue.NewConsumer(
-		assemblerKafkaCfg, 
-		domain.TopicStreamEnded, 
-		handleAssembly(logger, assemblerUseCase), 
-		logger, 
+		assemblerKafkaCfg,
+		domain.TopicStreamEnded,
+		handleAssembly(logger, assemblerUseCase),
+		logger,
 		&queue.ConsumerOptions{
-			MaxRetries: 10,
-			RetryDelay: 5 * time.Second, 
-			DLQ: dlqWriter, 
+			MaxRetries:         10,
+			RetryDelay:         5 * time.Second,
+			DLQ:                dlqWriter,
 			CommitOnDLQFailure: false,
-			MaxDLQFails: 3,
+			MaxDLQFails:        3,
 		},
 	)
 
 	allConsumers := []*queue.Consumer{
-		frameConsumer, 
-		streamStartedConsumer, 
-		streamEndedConsumer, 
-		assemblerConsumer, 
+		frameConsumer,
+		streamStartedConsumer,
+		streamEndedConsumer,
+		assemblerConsumer,
 	}
 	alertConfigs := queue.BuildAlertConfigs(
-		allConsumers, 
-		queue.DefaultAlertConfigs, 
+		allConsumers,
+		queue.DefaultAlertConfigs,
 		map[queue.ConsumerKey]queue.AlertConfig{
 			{Topic: domain.TopicStreamEnded, GroupID: "vox-assembler"}: {
 				LagThreshold: 50,
-				LagDuration: 5 * time.Minute,
+				LagDuration:  5 * time.Minute,
 				DLQThreshold: 3,
 			},
 		},
@@ -266,9 +272,9 @@ func main() {
 
 	monitor := queue.NewMonitor(
 		allConsumers,
-		dlqWriter, 
-		alertConfigs, 
-		alertFn, 
+		dlqWriter,
+		alertConfigs,
+		alertFn,
 		logger,
 	)
 
@@ -276,7 +282,6 @@ func main() {
 	streamStartedConsumer.SetMonitor(monitor)
 	streamEndedConsumer.SetMonitor(monitor)
 	assemblerConsumer.SetMonitor(monitor)
-
 
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
@@ -307,10 +312,11 @@ func main() {
 
 	go monitor.Run(runCtx)
 
+	hc := httpRoute.NewHealthChecker(redisClient, kafkaCfg.Brokers, kafkaCfg, storageClient, examClient)
 	go func() {
-		httpRoute.RunMetric(logger)
+		httpRoute.RunMetric(hc, logger)
 	}()
-	
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 	sig := <-quit
@@ -335,13 +341,12 @@ func main() {
 	}()
 
 	select {
-	case <- done:
+	case <-done:
 		logger.Info("grateful shutdown completed")
 	case <-shutdownCtx.Done():
 		logger.Warn("shutdown timeout - force close")
 	}
 }
-
 
 func handleFrameReady(logger *zap.Logger, bc *webrtctransport.RedisBroadcaster) queue.HandlerFunc {
 	return func(ctx context.Context, msg kafka.Message) error {
@@ -353,14 +358,14 @@ func handleFrameReady(logger *zap.Logger, bc *webrtctransport.RedisBroadcaster) 
 		// lưu kết quả vào db và notify cho spring boot service
 		// ...
 		bc.Publish(ctx, event.RoomID, webrtctransport.FrameNotification{
-			StreamID: event.StreamID, 
-			StreamType: event.StreamType, 
-			FrameURL: event.FrameURL,
+			StreamID:   event.StreamID,
+			StreamType: event.StreamType,
+			FrameURL:   event.FrameURL,
 			SequenceNo: event.SequenceNo,
 		})
-		logger.Debug("processing frame event", 
-			zap.String("stream_id", event.StreamID), 
-			zap.String("room_Id", event.RoomID), 
+		logger.Debug("processing frame event",
+			zap.String("stream_id", event.StreamID),
+			zap.String("room_Id", event.RoomID),
 			zap.Int64("seq", event.SequenceNo),
 		)
 
@@ -375,8 +380,8 @@ func handleStreamStarted(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.H
 			return fmt.Errorf("unmarshal stream started: %w", err)
 		}
 		logger.Info(
-			"stream started", 
-			zap.String("stream_id", event.StreamID), 
+			"stream started",
+			zap.String("stream_id", event.StreamID),
 			zap.String("room_id", event.RoomID),
 			zap.String("stream_type", event.StreamType),
 		)
@@ -395,9 +400,9 @@ func handleStreamEnded(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.Han
 			return fmt.Errorf("unmarshal stream ended event: %w", err)
 		}
 
-		logger.Info("stream ended", 
-			zap.String("stream_id", event.StreamID), 
-			zap.Int("segments_count", len(event.SegmentKeys)), 
+		logger.Info("stream ended",
+			zap.String("stream_id", event.StreamID),
+			zap.Int("segments_count", len(event.SegmentKeys)),
 			zap.Int64("duration_secs", event.Duration),
 		)
 
@@ -426,7 +431,7 @@ func buildICEServers() []pwebrtc.ICEServer {
 			URLs: []string{
 				turnURL,
 			},
-			Username: os.Getenv("TURN_USERNAME"),
+			Username:   os.Getenv("TURN_USERNAME"),
 			Credential: os.Getenv("TURN_CREDENTIAL"),
 		})
 	}
@@ -441,7 +446,7 @@ func parseAllowedOrigins() []string {
 	if raw == "" {
 		return []string{"http://localhost:5173"}
 	}
-	var origins []string 
+	var origins []string
 	for o := range strings.SplitSeq(raw, ",") {
 		if o = strings.TrimSpace(o); o != "" {
 			origins = append(origins, o)
@@ -457,7 +462,7 @@ func ensureStorage(startupCtx context.Context, logger *zap.Logger) *storage.Clie
 	}
 
 	storageCfg := storage.DefaultConfig(
-		storageEndpoint, 
+		storageEndpoint,
 		os.Getenv("STORAGE_ACCESS_KEY"),
 		os.Getenv("STORAGE_SECRET_KEY"),
 	)
