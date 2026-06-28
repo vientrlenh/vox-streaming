@@ -193,17 +193,22 @@ func main() {
 		alertFn = queue.LogOnlyAlert(logger)
 	}
 
-	frameConsumer := queue.NewConsumer(
-		kafkaCfg,
-		domain.TopicFrameReady,
-		handleFrameReady(logger, broadCaster),
-		logger,
+	frameConverterCfg := kafkaCfg
+	frameConverterCfg.GroupID = "vox-frame-converter"
+	maxConv, _ := strconv.Atoi(os.Getenv("FRAME_CONVERT_CONCURRENCY"))
+	frameConvertUseCase := usecase.NewFrameConvertUseCase(storageClient, broadCaster, maxConv, logger)
+
+	frameConverterConsumer := queue.NewConsumer(
+		frameConverterCfg, 
+		domain.TopicFrameReady, 
+		handleFrameConvert(logger, frameConvertUseCase), 
+		logger, 
 		&queue.ConsumerOptions{
-			MaxRetries:         3,
-			RetryDelay:         500 * time.Millisecond,
-			DLQ:                dlqWriter,
-			CommitOnDLQFailure: true, // frame mất không bị ảnh hưởng
-			MaxDLQFails:        0,
+			MaxRetries: 2, 
+			RetryDelay: 300 * time.Millisecond, 
+			DLQ: dlqWriter, 
+			CommitOnDLQFailure: true,
+			MaxDLQFails: 0,
 		},
 	)
 
@@ -253,7 +258,7 @@ func main() {
 	)
 
 	allConsumers := []*queue.Consumer{
-		frameConsumer,
+		frameConverterConsumer,
 		streamStartedConsumer,
 		streamEndedConsumer,
 		assemblerConsumer,
@@ -278,7 +283,7 @@ func main() {
 		logger,
 	)
 
-	frameConsumer.SetMonitor(monitor)
+	frameConverterConsumer.SetMonitor(monitor)
 	streamStartedConsumer.SetMonitor(monitor)
 	streamEndedConsumer.SetMonitor(monitor)
 	assemblerConsumer.SetMonitor(monitor)
@@ -287,7 +292,7 @@ func main() {
 	defer runCancel()
 
 	go func() {
-		if err := frameConsumer.Run(runCtx); err != nil {
+		if err := frameConverterConsumer.Run(runCtx); err != nil {
 			logger.Error("frame consumer error", zap.Error(err))
 		}
 	}()
@@ -329,7 +334,7 @@ func main() {
 
 	done := make(chan struct{})
 	go func() {
-		frameConsumer.Close()
+		frameConverterConsumer.Close()
 		streamStartedConsumer.Close()
 		streamEndedConsumer.Close()
 		assemblerConsumer.Close()
@@ -348,30 +353,6 @@ func main() {
 	}
 }
 
-func handleFrameReady(logger *zap.Logger, bc *webrtctransport.RedisBroadcaster) queue.HandlerFunc {
-	return func(ctx context.Context, msg kafka.Message) error {
-		var event domain.FrameReadyEvent
-		if err := json.Unmarshal(msg.Value, &event); err != nil {
-			return fmt.Errorf("unmarshal frame event: %w", err)
-		}
-
-		// lưu kết quả vào db và notify cho spring boot service
-		// ...
-		bc.Publish(ctx, event.RoomID, webrtctransport.FrameNotification{
-			StreamID:   event.StreamID,
-			StreamType: event.StreamType,
-			FrameURL:   event.FrameURL,
-			SequenceNo: event.SequenceNo,
-		})
-		logger.Debug("processing frame event",
-			zap.String("stream_id", event.StreamID),
-			zap.String("room_Id", event.RoomID),
-			zap.Int64("seq", event.SequenceNo),
-		)
-
-		return nil
-	}
-}
 
 func handleStreamStarted(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.HandlerFunc {
 	return func(ctx context.Context, msg kafka.Message) error {
@@ -401,9 +382,9 @@ func handleStreamEnded(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.Han
 		}
 
 		logger.Info("stream ended",
-			zap.String("stream_id", event.StreamID),
-			zap.Int("segments_count", len(event.SegmentKeys)),
-			zap.Int64("duration_secs", event.Duration),
+			zap.String("streamId", event.StreamID),
+			zap.Int("segmentsCount", len(event.SegmentKeys)),
+			zap.Int64("durationSecs", event.Duration),
 		)
 
 		mu.NotifyLeft(ctx, event.RoomID, event.ParticipantID, event.StreamID, event.StreamType)
@@ -489,5 +470,15 @@ func handleAssembly(logger *zap.Logger, uc *usecase.AssemblerUseCase) queue.Hand
 			return fmt.Errorf("unmarshal stream ended for assembly: %w", err)
 		}
 		return uc.Assemble(ctx, event)
+	}
+}
+
+func handleFrameConvert(logger *zap.Logger, uc *usecase.FrameConvertUseCase) queue.HandlerFunc {
+	return func(ctx context.Context, msg kafka.Message) error {
+		var event domain.FrameReadyEvent
+		if err := json.Unmarshal(msg.Value, &event); err != nil {
+			return fmt.Errorf("unmarshal frame for convert: %w", err)
+		}
+		return uc.Convert(ctx, event)
 	}
 }

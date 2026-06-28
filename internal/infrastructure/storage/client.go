@@ -288,3 +288,29 @@ func (c *Client) UploadFinalRecording(ctx context.Context, roomID, streamID stri
 	}
 	return key, nil
 }
+
+func (c *Client) DownloadFrame(ctx context.Context, roomID, streamID string, seq int64) ([]byte, error) {
+	out, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.cfg.FrameBucket), 
+		Key: aws.String(frameKey(roomID, streamID, seq)),
+	})
+	if err != nil {
+		return nil,fmt.Errorf("get frame error: %w", err)
+	}
+	defer out.Body.Close()
+	return io.ReadAll(out.Body)
+}
+
+func (c *Client) UploadFrameJPEG(ctx context.Context, roomID, streamID string, seq int64, data []byte) (string, error) {
+	key := fmt.Sprintf("rooms/%s/streams/%s/%010d.jpg", roomID, streamID, seq)
+	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(c.cfg.FrameBucket), 
+		Key: aws.String(key), 
+		Body: bytes.NewReader(data), 
+		ContentType: aws.String("image/jpeg"),
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload frame jpeg: %w", err)
+	}
+	return key, nil
+}

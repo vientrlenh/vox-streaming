@@ -225,8 +225,8 @@ func (fe *FrameExtractor) commitPicture() {
 	fe.picBuf = nil
 }
 
-// Deprecated: this method make ffmpeg spawn for capturing jpeg image -> not ideal for many sessions ==> use CaptureKeyFrame instead
-// 
+
+// use for displaying frame on browsers (browsers support JPEG rendering)
 // encode the latest buffered IDR frame as JPEG via ffmpeg
 func (fe *FrameExtractor) CaptureJPEG(ctx context.Context) ([]byte, error) {
 	fe.mu.Lock()
@@ -279,6 +279,10 @@ func h264ToJPEG(ctx context.Context, h264Data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("ffmpeg produced empty output")
 	}
 	return out.Bytes(), nil
+}
+
+func H264ToJPEG(ctx context.Context, annexB []byte) ([]byte, error) {
+	return h264ToJPEG(ctx, annexB)
 }
 
 // return Annex-B encoded H.264 keyframe (SPS + PPS + IDR)

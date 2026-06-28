@@ -179,3 +179,22 @@ func (b *RedisBroadcaster) SubscribeAlerts(ctx context.Context, roomID string) <
 	return out
 }
 
+// is the room has teacher subscribe (pubsub numsub)
+func (b *RedisBroadcaster) HasMonitor(ctx context.Context, roomID string) (bool, error) {
+	res, err := b.client.PubSubNumSub(ctx, roomChannel(roomID)).Result()
+	if err != nil {
+		return false, nil
+	}
+	return res[roomChannel(roomID)] > 0, nil
+}
+
+
+func (b *RedisBroadcaster) PublishFrameURL(ctx context.Context, roomID, streamID, streamType, frameURL string, seq int64) {
+	b.Publish(ctx, roomID, FrameNotification{
+		StreamID: streamID, 
+		StreamType: streamType,
+		FrameURL: frameURL,
+		SequenceNo: seq,
+	})
+}
+

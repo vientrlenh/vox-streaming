@@ -11,16 +11,16 @@ import (
 )
 
 type StreamInfo struct {
-	ParticipantID string
-	StreamID      string
-	StreamType    string
-	StartedAt     time.Time
+	ParticipantID string    `json:"participantId"`
+	StreamID      string    `json:"streamId"`
+	StreamType    string    `json:"streamType"`
+	StartedAt     time.Time `json:"startedAt"`
 }
 
 type RoomSummary struct {
-	RoomID string
-	ActiveCount int
-	Streams []StreamInfo
+	RoomID      string       `json:"roomId"`
+	ActiveCount int          `json:"activeCount"`
+	Streams     []StreamInfo `json:"streams"`
 }
 
 type SessionScanner interface {
