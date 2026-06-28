@@ -15,7 +15,7 @@ func LogOnlyAlert(logger *zap.Logger) AlertFunc {
 		logger.Error("KAFKA ALERT - action required",
 			zap.String("level", string(alert.Level)),
 			zap.String("topic", alert.Topic),
-			zap.String("group_id", alert.GroupID),
+			zap.String("groupId", alert.GroupID),
 			zap.String("message", alert.Message),
 			zap.Int64("value", alert.Value),
 			zap.Int64("threshold", alert.Threshold),

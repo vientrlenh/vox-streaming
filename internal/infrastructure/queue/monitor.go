@@ -19,29 +19,29 @@ var (
 		Subsystem: "consumer",
 		Name:      "lag",
 		Help:      "Number of messages waiting to be processed (producer offset - consumer offset)",
-	}, []string{"topic", "group_id"})
+	}, []string{"topic", "groupId"})
 	metricMessagesProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kafka",
 		Subsystem: "consumer",
-		Name:      "messages_processed_total",
+		Name:      "messagesProcessedTotal",
 		Help:      "Total number of messages successfully processed",
-	}, []string{"topic", "group_id"})
+	}, []string{"topic", "groupId"})
 	metricMessagesFailed = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kafka",
 		Subsystem: "consumer",
-		Name:      "messages_failed_total",
+		Name:      "messagesFailedTotal",
 		Help:      "Total number of messages that failed after all retries",
-	}, []string{"topic", "group_id", "reason"})
+	}, []string{"topic", "groupId", "reason"})
 	metricDLQMessage = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kafka",
 		Subsystem: "consumer",
-		Name:      "dlq_messages_total",
+		Name:      "dlqMessagesTotal",
 		Help:      "Total number of messages sent to dead letter queue",
-	}, []string{"topic", "group_id", "reason"})
+	}, []string{"topic", "groupId", "reason"})
 	metricProcessingDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "kafka",
 		Subsystem: "consumer",
-		Name:      "processing_duration_seconds",
+		Name:      "processingDurationSeconds",
 		Help:      "Time taken to process a single message",
 		Buckets:   []float64{0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10},
 	}, []string{"topic", "group_id"})
@@ -54,10 +54,10 @@ var (
 	metricDLQWriteDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "kafka",
 		Subsystem: "dlq",
-		Name:      "write_duration_seconds",
+		Name:      "writeDurationSeconds",
 		Help:      "Time taken to write a message to DLQ",
 		Buckets:   []float64{0.01, 0.05, 0.1, 0.5, 1, 5},
-	}, []string{"topic", "group_id", "reason"})
+	}, []string{"topic", "groupId", "reason"})
 )
 
 type ConsumerKey struct {
@@ -191,13 +191,13 @@ func (m *Monitor) processStats(stats kafka.ReaderStats, groupID string) {
 
 	m.logger.Debug("kafka consumer stats",
 		zap.String("topic", topic), 
-		zap.String("group_id", groupID),
+		zap.String("groupId", groupID),
 		zap.Int64("lag", stats.Lag),
 		zap.Int64("messages", stats.Messages),
-		zap.Int64("fetch_errors", stats.Errors),
-		zap.Duration("read_time_avg", stats.ReadTime.Avg),
-		zap.Duration("wait_time_avg", stats.WaitTime.Avg),
-		zap.Int64("bytes_read", stats.Bytes),
+		zap.Int64("fetchErrors", stats.Errors),
+		zap.Duration("readTimeAvg", stats.ReadTime.Avg),
+		zap.Duration("waitTimeAvg", stats.WaitTime.Avg),
+		zap.Int64("bytesRead", stats.Bytes),
 	)
 
 	alertCfg, hasAlert := m.alertConfigs[key]
@@ -297,7 +297,7 @@ func (m *Monitor) fireAlert(alert Alert) {
 	m.logger.Error("KAFKA ALERT",
 		zap.String("level", string(alert.Level)),
 		zap.String("topic", alert.Topic),
-		zap.String("group_id", alert.GroupID),
+		zap.String("groupId", alert.GroupID),
 		zap.String("message", alert.Message),
 		zap.Int64("value", alert.Value),
 		zap.Int64("threshold", alert.Threshold),

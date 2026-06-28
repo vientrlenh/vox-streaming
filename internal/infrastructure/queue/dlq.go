@@ -13,20 +13,20 @@ import (
 const dlqSuffix = ".dlq"
 
 type DLQMessage struct {
-	FailedAt     time.Time `json:"failed_at"`
+	FailedAt     time.Time `json:"failedAt"`
 	Reason       string    `json:"reason"`
-	ErrorDetail  string    `json:"error_detail"`
-	AttemptCount int       `json:"attempt_count"`
+	ErrorDetail  string    `json:"errorDetail"`
+	AttemptCount int       `json:"attemptCount"`
 
-	OriginalTopic     string `json:"original_topic"`
-	OriginalPartition int    `json:"original_partition"`
-	OriginalOffset    int64  `json:"original_offset"`
-	OriginalKey       string `json:"original_key"`
+	OriginalTopic     string `json:"originalTopic"`
+	OriginalPartition int    `json:"originalPartition"`
+	OriginalOffset    int64  `json:"originalOffset"`
+	OriginalKey       string `json:"originalKey"`
 
-	OriginalPayload json.RawMessage `json:"original_payload"`
+	OriginalPayload json.RawMessage `json:"originalPayload"`
 
-	OriginalHeaders map[string]string `json:"original_headers,omitempty"`
-	ConsumerGroup   string            `json:"consumer_group"`
+	OriginalHeaders map[string]string `json:"originalHeaders,omitempty"`
+	ConsumerGroup   string            `json:"consumerGroup"`
 }
 
 type DLQWriter struct {
@@ -55,14 +55,14 @@ func NewDLQWriter(cfg Config, topics []string, logger *zap.Logger) (*DLQWriter, 
 
 			ErrorLogger: kafka.LoggerFunc(func(msg string, args ...any) {
 				logger.Error("kafka dlq writer error",
-					zap.String("dlq_topic", dlqTopic),
+					zap.String("dlqTopic", dlqTopic),
 					zap.String("msg", fmt.Sprintf(msg, args...)),
 				)
 			}),
 		}
 		logger.Info("dlq writer initialized",
-			zap.String("original_topic", topic),
-			zap.String("dlq_topic", dlqTopic),
+			zap.String("originalTopic", topic),
+			zap.String("dlqTopic", dlqTopic),
 		)
 	}
 
@@ -130,9 +130,9 @@ func (d *DLQWriter) Send(ctx context.Context, originalMsg kafka.Message, handler
 	}
 
 	d.logger.Warn("message sent to DLQ",
-		zap.String("dlq_topic", originalMsg.Topic+dlqSuffix),
-		zap.String("original_topic", originalMsg.Topic),
-		zap.Int64("original_offset", originalMsg.Offset),
+		zap.String("dlqTopic", originalMsg.Topic+dlqSuffix),
+		zap.String("originalTopic", originalMsg.Topic),
+		zap.Int64("originalOffset", originalMsg.Offset),
 		zap.String("reason", dlqMsg.Reason),
 		zap.Int("attempts", attemptCount),
 	)
@@ -247,8 +247,8 @@ func (r *DLQReprocessor) ReplayToOriginalTopic(ctx context.Context, filter func(
 
 		if writeErr != nil {
 			r.logger.Error("dlq replay: failed to republish",
-				zap.String("original_topic", dlqMsg.OriginalTopic),
-				zap.String("original_key", dlqMsg.OriginalKey),
+				zap.String("originalTopic", dlqMsg.OriginalTopic),
+				zap.String("originalKey", dlqMsg.OriginalKey),
 				zap.Error(writeErr),
 			)
 			return replayed, skipped, writeErr
@@ -258,8 +258,8 @@ func (r *DLQReprocessor) ReplayToOriginalTopic(ctx context.Context, filter func(
 		replayed++
 
 		r.logger.Info("dlq message replayed",
-			zap.String("original_topic", dlqMsg.OriginalTopic),
-			zap.Int64("original_offset", dlqMsg.OriginalOffset),
+			zap.String("originalTopic", dlqMsg.OriginalTopic),
+			zap.Int64("originalOffset", dlqMsg.OriginalOffset),
 			zap.String("reason", dlqMsg.Reason),
 		)
 	}

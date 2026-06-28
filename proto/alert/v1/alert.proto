@@ -9,12 +9,12 @@ service AlertService {
 }
 
 message PushAlertRequest {
-	string room_id = 1;
-	string participant_id = 2;
-	string stream_id = 3;
-	string alert_type = 4;
+	string roomId = 1;
+	string participantId = 2;
+	string streamId = 3;
+	string alertType = 4;
 	float confidence = 5;
-	int64 captured_at_ms = 6;
+	int64 capturedAtMs = 6;
 }
 
 message PushAlertResponse {

@@ -10,9 +10,9 @@ service ExamService {
 }
 
 message ValidateAccessRequest {
-    string room_id = 1;
-    string participant_id = 2;
-    string stream_type = 3;
+    string roomId = 1;
+    string participantId = 2;
+    string streamType = 3;
 }
 
 message ValidateAccessResponse {
@@ -21,10 +21,10 @@ message ValidateAccessResponse {
 }
 
 message UpdateRecordingRequest {
-    string stream_id = 1;
-    string room_id = 2;
-    string recording_url = 3;
-    int64 duration_secs = 4;
+    string streamId = 1;
+    string roomId = 2;
+    string recordingUrl = 3;
+    int64 durationSecs = 4;
 }
 
 message UpdateRecordingResponse {

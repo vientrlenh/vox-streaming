@@ -12,10 +12,10 @@ type Config struct {
 	Addr         string        `mapstructure:"addr"`
 	Password     string        `mapstructure:"password"`
 	DB           int           `mapstructure:"db"`
-	DialTimeout  time.Duration `mapstructure:"dial_timeout"`
-	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout time.Duration `mapstructure:"write_timeout"`
-	PoolSize     int           `mapstructure:"pool_size"`
+	DialTimeout  time.Duration `mapstructure:"dialTimeout"`
+	ReadTimeout  time.Duration `mapstructure:"readTimeout"`
+	WriteTimeout time.Duration `mapstructure:"writeTimeout"`
+	PoolSize     int           `mapstructure:"poolSize"`
 }
 
 func DefaultConfig(addr string) Config {

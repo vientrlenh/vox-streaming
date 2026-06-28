@@ -136,10 +136,10 @@ func NewPeer(
 		storage: storage,
 		done:          make(chan struct{}),
 		logger: logger.With(
-			zap.String("room_id", roomID),
-			zap.String("participant_id", participantID),
-			zap.String("stream_id", streamID),
-			zap.String("stream_type", streamType),
+			zap.String("roomId", roomID),
+			zap.String("participantId", participantID),
+			zap.String("streamId", streamID),
+			zap.String("streamType", streamType),
 		),
 	}
 	p.closedByFailure.Store(false)
@@ -438,13 +438,13 @@ func (p *Peer) close() {
 		}
 		if err := p.pc.Close(); err != nil {
 			p.logger.Error("stream end close failed", 
-				zap.String("stream_id", p.streamID), 
-				zap.String("room_id", p.roomID), 
+				zap.String("streamId", p.streamID), 
+				zap.String("roomId", p.roomID), 
 				zap.Error(err),
 			)
 		}
 		p.logger.Info("peer closed", 
-			zap.Int64("duration_secs", duration),
+			zap.Int64("durationSecs", duration),
 		)
 	})
 }

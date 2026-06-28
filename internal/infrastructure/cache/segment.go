@@ -16,11 +16,11 @@ const segmentTTL = 24 * time.Hour
 
 type SegmentMeta struct {
 	Seq        int64     `json:"seq"`
-	S3Key      string    `json:"s3_key"`
-	StartedAt  time.Time `json:"started_at"`
-	EndedAt    time.Time `json:"ended_at"`
-	SizeBytes  int64     `json:"size_bytes"`
-	UploadedAt time.Time `json:"uploaded_at"`
+	S3Key      string    `json:"s3Key"`
+	StartedAt  time.Time `json:"startedAt"`
+	EndedAt    time.Time `json:"endedAt"`
+	SizeBytes  int64     `json:"sizeBytes"`
+	UploadedAt time.Time `json:"uploadedAt"`
 }
 
 type SegmentRegistry struct {

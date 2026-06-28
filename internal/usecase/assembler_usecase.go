@@ -43,7 +43,7 @@ func NewAssemblerUseCase(storage *storage.Client, examClient *examgrpc.ExamClien
 
 func (u *AssemblerUseCase) Assemble(ctx context.Context, event domain.StreamEndedEvent) error {
 	if len(event.SegmentKeys) == 0 {
-		u.logger.Debug("no server segments, skipping assembly", zap.String("stream_id", event.StreamID))
+		u.logger.Debug("no server segments, skipping assembly", zap.String("streamId", event.StreamID))
 		return nil
 	}
 	select {
@@ -54,9 +54,9 @@ func (u *AssemblerUseCase) Assemble(ctx context.Context, event domain.StreamEnde
 	}
 
 	log := u.logger.With(
-		zap.String("stream_id", event.StreamID), 
-		zap.String("room_id", event.RoomID), 
-		zap.Int("segment_count", len(event.SegmentKeys)),
+		zap.String("streamId", event.StreamID), 
+		zap.String("roomId", event.RoomID), 
+		zap.Int("segmentCount", len(event.SegmentKeys)),
 	)
 
 	// Idempotency check
@@ -122,7 +122,7 @@ func (u *AssemblerUseCase) Assemble(ctx context.Context, event domain.StreamEnde
 		return fmt.Errorf("notify exam service: %w", err)
 	}
 
-	log.Info("assembly completed", zap.String("recording_key", recordingKey))
+	log.Info("assembly completed", zap.String("recordingKey", recordingKey))
 	return nil
 }
 

@@ -6,19 +6,19 @@ import (
 
 type Config struct {
 	Brokers        []string      `mapstructure:"brokers"`
-	GroupID        string        `mapstructure:"group_id"`
-	BatchSize      int           `mapstructure:"batch_size"`
-	BatchTimeout   time.Duration `mapstructure:"batch_timeout"`
+	GroupID        string        `mapstructure:"groupId"`
+	BatchSize      int           `mapstructure:"batchSize"`
+	BatchTimeout   time.Duration `mapstructure:"batchTimeout"`
 	Async          bool          `mapstructure:"async"`
-	RequiredAcks   int           `mapstructure:"required_acks"`
-	MinBytes       int           `mapstructure:"min_bytes"`
-	MaxBytes       int           `mapstructure:"max_bytes"`
-	CommitInterval time.Duration `mapstructure:"commit_interval"`
-	StartOffset    int64         `mapstructure:"start_offset"`
-	MaxWait        time.Duration `mapstructure:"max_wait"`
-	TLSEnabled     bool          `mapstructure:"tls_enabled"`
-	SASLUser       string        `mapstructure:"sasl_user"`
-	SASLPass       string        `mapstructure:"sasl_pass"`
+	RequiredAcks   int           `mapstructure:"requiredAcks"`
+	MinBytes       int           `mapstructure:"minBytes"`
+	MaxBytes       int           `mapstructure:"maxBytes"`
+	CommitInterval time.Duration `mapstructure:"commitInterval"`
+	StartOffset    int64         `mapstructure:"startOffset"`
+	MaxWait        time.Duration `mapstructure:"maxWait"`
+	TLSEnabled     bool          `mapstructure:"tlsEnabled"`
+	SASLUser       string        `mapstructure:"saslUser"`
+	SASLPass       string        `mapstructure:"saslPass"`
 }
 
 func DefaultConfig(brokers []string, groupID string) Config {

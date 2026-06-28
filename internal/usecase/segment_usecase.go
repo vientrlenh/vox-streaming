@@ -63,7 +63,7 @@ func (u *SegmentUseCase) Upload(ctx context.Context, req SegmentUploadRequest) e
 		return fmt.Errorf("no active session for participant %s in room %s", req.ParticipantID, req.RoomID)
 	}
 	if session.StreamID != req.StreamID {
-		return fmt.Errorf("stream_id mismatch: expected %s, got %s", session.StreamID, req.StreamID)
+		return fmt.Errorf("streamId mismatch: expected %s, got %s", session.StreamID, req.StreamID)
 	}
 
 	key, err := u.storage.UploadSegment(ctx, req.RoomID, req.StreamID, req.Seq, req.Data)

@@ -59,7 +59,7 @@ func (b *RedisBroadcaster) Subscribe(ctx context.Context, roomID string) <-chan 
 					return // admin disconnect
 				}
 				b.logger.Warn("broadcaster receive failed", 
-					zap.String("room_id", roomID), 
+					zap.String("roomId", roomID), 
 					zap.Error(err),
 				)
 				return
@@ -95,7 +95,7 @@ func (b *RedisBroadcaster) PublishParticipantEvent(ctx context.Context, roomID s
 	}
 	if err := b.client.Publish(ctx, roomEventsChannel(roomID), data).Err(); err != nil {
 		b.logger.Warn("participant event published failed", 
-			zap.String("room_id", roomID), 
+			zap.String("roomId", roomID), 
 			zap.Error(err),
 		)
 	}
@@ -145,7 +145,7 @@ func (b *RedisBroadcaster) PublishAlertEvent(ctx context.Context, roomID string,
 	}
 	if err := b.client.Publish(ctx, roomAlertsChannel(roomID), data).Err(); err != nil {
 		b.logger.Warn("alert publish failed", 
-			zap.String("room_id", roomID), 
+			zap.String("roomId", roomID), 
 			zap.Error(err),
 		)
 		return fmt.Errorf("redis publish: %w", err)

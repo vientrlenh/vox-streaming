@@ -216,7 +216,7 @@ func (c *Consumer) processMessage(ctx context.Context, msg kafka.Message) bool {
 			c.logger.Error("POISON PILL: force commiting after max DLQ failures - message permanently lost",
 				zap.String("topic", c.topic),
 				zap.Int64("offset", msg.Offset),
-				zap.Int("dlq_fail_count", c.dlqFailCount),
+				zap.Int("dlqFailCount", c.dlqFailCount),
 				zap.String("payload", previewBytes(msg.Value, 500)),
 			)
 			c.dlqFailCount = 0

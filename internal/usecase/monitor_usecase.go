@@ -71,8 +71,8 @@ func (u *MonitorUseCase) GetRoomSnapshot(ctx context.Context, roomID string) ([]
 		})
 	}
 	u.logger.Debug("room snapshot detected", 
-		zap.String("room_id", roomID), 
-		zap.Int("active_streams", 
+		zap.String("roomId", roomID), 
+		zap.Int("activeStreams", 
 		len(infos)),
 	)
 	return infos, nil
@@ -110,8 +110,8 @@ func (u *MonitorUseCase) GetActiveRooms(ctx context.Context, allowedRoomIDs []st
 		})
 	}
 	u.logger.Debug("active room fetched", 
-		zap.Int("allowed_rooms", len(allowedRoomIDs)), 
-		zap.Int("active_rooms", len(result)),
+		zap.Int("allowedRooms", len(allowedRoomIDs)), 
+		zap.Int("activeRooms", len(result)),
 	)
 	return result, nil
 }

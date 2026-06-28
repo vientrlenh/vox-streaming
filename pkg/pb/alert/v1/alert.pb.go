@@ -23,12 +23,12 @@ const (
 
 type PushAlertRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	RoomId        string                 `protobuf:"bytes,1,opt,name=room_id,json=roomId,proto3" json:"room_id,omitempty"`
-	ParticipantId string                 `protobuf:"bytes,2,opt,name=participant_id,json=participantId,proto3" json:"participant_id,omitempty"`
-	StreamId      string                 `protobuf:"bytes,3,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
-	AlertType     string                 `protobuf:"bytes,4,opt,name=alert_type,json=alertType,proto3" json:"alert_type,omitempty"`
+	RoomId        string                 `protobuf:"bytes,1,opt,name=roomId,proto3" json:"roomId,omitempty"`
+	ParticipantId string                 `protobuf:"bytes,2,opt,name=participantId,proto3" json:"participantId,omitempty"`
+	StreamId      string                 `protobuf:"bytes,3,opt,name=streamId,proto3" json:"streamId,omitempty"`
+	AlertType     string                 `protobuf:"bytes,4,opt,name=alertType,proto3" json:"alertType,omitempty"`
 	Confidence    float32                `protobuf:"fixed32,5,opt,name=confidence,proto3" json:"confidence,omitempty"`
-	CapturedAtMs  int64                  `protobuf:"varint,6,opt,name=captured_at_ms,json=capturedAtMs,proto3" json:"captured_at_ms,omitempty"`
+	CapturedAtMs  int64                  `protobuf:"varint,6,opt,name=capturedAtMs,proto3" json:"capturedAtMs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -153,17 +153,16 @@ var File_alert_v1_alert_proto protoreflect.FileDescriptor
 
 const file_alert_v1_alert_proto_rawDesc = "" +
 	"\n" +
-	"\x14alert/v1/alert.proto\x12\balert.v1\"\xd4\x01\n" +
-	"\x10PushAlertRequest\x12\x17\n" +
-	"\aroom_id\x18\x01 \x01(\tR\x06roomId\x12%\n" +
-	"\x0eparticipant_id\x18\x02 \x01(\tR\rparticipantId\x12\x1b\n" +
-	"\tstream_id\x18\x03 \x01(\tR\bstreamId\x12\x1d\n" +
-	"\n" +
-	"alert_type\x18\x04 \x01(\tR\talertType\x12\x1e\n" +
+	"\x14alert/v1/alert.proto\x12\balert.v1\"\xce\x01\n" +
+	"\x10PushAlertRequest\x12\x16\n" +
+	"\x06roomId\x18\x01 \x01(\tR\x06roomId\x12$\n" +
+	"\rparticipantId\x18\x02 \x01(\tR\rparticipantId\x12\x1a\n" +
+	"\bstreamId\x18\x03 \x01(\tR\bstreamId\x12\x1c\n" +
+	"\talertType\x18\x04 \x01(\tR\talertType\x12\x1e\n" +
 	"\n" +
 	"confidence\x18\x05 \x01(\x02R\n" +
-	"confidence\x12$\n" +
-	"\x0ecaptured_at_ms\x18\x06 \x01(\x03R\fcapturedAtMs\"/\n" +
+	"confidence\x12\"\n" +
+	"\fcapturedAtMs\x18\x06 \x01(\x03R\fcapturedAtMs\"/\n" +
 	"\x11PushAlertResponse\x12\x1a\n" +
 	"\breceived\x18\x01 \x01(\bR\breceived2T\n" +
 	"\fAlertService\x12D\n" +

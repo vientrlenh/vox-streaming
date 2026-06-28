@@ -115,7 +115,7 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 		if !allowed {
 			h.logger.Warn("exam access denined", 
 				zap.String("reason", reason), 
-				zap.String("participant_id", claims.UserID),
+				zap.String("participantId", claims.UserID),
 			)
 			http.Error(w, reason, http.StatusForbidden)
 			return
@@ -172,11 +172,11 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	roomID := q.Get("room_id")
+	roomID := q.Get("roomId")
 	token := q.Get("token")
 
 	if roomID == "" {
-		http.Error(w, "missing room_id", http.StatusBadRequest)
+		http.Error(w, "missing roomId", http.StatusBadRequest)
 		return
 	}
 
@@ -203,12 +203,12 @@ func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 
 	conn := &safeConn{conn: rawConn}
 
-	h.logger.Info("monitor connected", zap.String("room_id", roomID), zap.String("user_id", claims.UserID))
+	h.logger.Info("monitor connected", zap.String("roomId", roomID), zap.String("userId", claims.UserID))
 
 	// gửi snapshot ngay khi kết nối - monitor thấy ngay khi ai đó đang online
 	snapshot, err := h.monitorUseCase.GetRoomSnapshot(ctx, roomID)
 	if err != nil {
-		h.logger.Error("get room snapshot failed", zap.String("room_id", roomID), zap.Error(err))
+		h.logger.Error("get room snapshot failed", zap.String("roomId", roomID), zap.Error(err))
 	}
 	_ = conn.WriteJSON(MonitorMessage{
 		Type: "snapshot", 

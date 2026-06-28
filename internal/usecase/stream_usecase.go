@@ -29,7 +29,7 @@ func (u *StreamUseCase) NotifyStreamStarted(ctx context.Context, roomID, partici
 	startedAt := time.Now().UTC()
 	if err := u.sessions.Register(ctx, roomID, participantID, streamType, streamID, startedAt); err != nil {
 		u.logger.Warn("session register failed - monitor may miss this peer",
-			zap.String("stream_id", streamID), 
+			zap.String("streamId", streamID), 
 			zap.Error(err), 
 		)
 	}
@@ -61,7 +61,7 @@ func (u *StreamUseCase) PublishFrame(ctx context.Context, roomID, participantID,
 	// frame tick = peer đang sống -> refresh session dù Kafka có fail hay không
 	if err := u.sessions.Refresh(ctx, roomID, participantID, streamType); err != nil {
 		u.logger.Warn("session refresh failed", 
-			zap.String("stream_id", streamID), 
+			zap.String("streamId", streamID), 
 			zap.Error(err),
 		)
 	}
@@ -81,16 +81,16 @@ func (u *StreamUseCase) PublishFrame(ctx context.Context, roomID, participantID,
 	if err := u.publisher.PublishFrameReady(ctx, event); err != nil {
 		// warning, không fail stream
 		u.logger.Error("publish frame event failed", 
-			zap.String("stream_id", streamID), 
+			zap.String("streamId", streamID), 
 			zap.Int64("seq", seq), 
 			zap.Error(err),
 		)
 		return err
 	}
 	u.logger.Debug("frame event published",
-		zap.String("stream_id", streamID),
+		zap.String("streamId", streamID),
 		zap.Int64("seq", seq),
-		zap.String("frame_url", frameURL),
+		zap.String("frameUrl", frameURL),
 	)
 
 
@@ -101,7 +101,7 @@ func (u *StreamUseCase) NotifyStreamEnded(ctx context.Context, roomID, participa
 	// peer đóng -> unregister
 	if err := u.sessions.Unregister(ctx, roomID, participantID, streamType); err != nil {
 		u.logger.Warn("session unregister failed", 
-			zap.String("stream_id", streamID), 
+			zap.String("streamId", streamID), 
 			zap.Error(err),
 		)
 	}
@@ -121,9 +121,9 @@ func (u *StreamUseCase) NotifyStreamEnded(ctx context.Context, roomID, participa
 	}
 
 	u.logger.Info("stream ended event published",
-		zap.String("stream_id", streamID),
-		zap.Int("segment_count", len(segmentKeys)),
-		zap.Int64("duration_secs", durationSecs),
+		zap.String("streamId", streamID),
+		zap.Int("segmentCount", len(segmentKeys)),
+		zap.Int64("durationSecs", durationSecs),
 	)
 
 	return nil

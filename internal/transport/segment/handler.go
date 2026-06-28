@@ -110,7 +110,7 @@ func (h *SegmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.useCase.Upload(r.Context(), req); err != nil {
 		h.logger.Warn("segment upload failed", 
-			zap.String("stream_id", streamID),
+			zap.String("streamId", streamID),
 			zap.Int64("seq", seq),
 			zap.Error(err),
 		)
@@ -119,9 +119,9 @@ func (h *SegmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logger.Info("segment uploaded", 
-		zap.String("stream_id", streamID), 
+		zap.String("streamId", streamID), 
 		zap.Int64("seq", seq), 
-		zap.Int("size_bytes", len(data)),
+		zap.Int("sizeBytes", len(data)),
 	)
 	w.WriteHeader(http.StatusNoContent)
 }

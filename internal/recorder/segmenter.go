@@ -276,7 +276,7 @@ func (r *SegmentedRecorder) finalizeAndUpload(ctx context.Context, sw *segmentWr
 
 	r.logger.Info("segment uploaded",
 		zap.Int64("seq", seq),
-		zap.String("s3_key", s3Key),
+		zap.String("s3Key", s3Key),
 		zap.Duration("duration", endedAt.Sub(startedAt)),
 	)
 }
