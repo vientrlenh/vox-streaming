@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl"
 	"github.com/segmentio/kafka-go/sasl/scram"
 	"go.uber.org/zap"
 )
@@ -39,14 +40,23 @@ type ConsumerOptions struct {
 	MaxDLQFails         int
 }
 
+type consumerTransport struct {
+	TLS *tls.Config
+	SASL sasl.Mechanism
+}
+
 func NewConsumer(cfg Config, topic string, handler HandlerFunc, logger *zap.Logger, opts *ConsumerOptions) *Consumer {
-	var dialer *kafka.Dialer
-	if cfg.TLSEnabled || cfg.SASLUser != "" {
+	var transport consumerTransport
+	if cfg.TLSEnabled {
+		transport.TLS = &tls.Config{}
+	}
+	if cfg.SASLUser != "" && cfg.SASLPass != "" {
 		mechanism, _ := scram.Mechanism(scram.SHA256, cfg.SASLUser, cfg.SASLPass)
-		dialer = &kafka.Dialer{
-			SASLMechanism: mechanism,
-			TLS:           &tls.Config{},
-		}
+		transport.SASL = mechanism
+	}
+	dialer := &kafka.Dialer{
+		TLS: transport.TLS, 
+		SASLMechanism: transport.SASL,
 	}
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:  cfg.Brokers,

@@ -29,7 +29,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func main() { 
+func main() {
 	logger, _ := zap.NewProduction()
 	defer logger.Sync()
 
@@ -199,16 +199,16 @@ func main() {
 	frameConvertUseCase := usecase.NewFrameConvertUseCase(storageClient, broadCaster, maxConv, logger)
 
 	frameConverterConsumer := queue.NewConsumer(
-		frameConverterCfg, 
-		domain.TopicFrameReady, 
-		handleFrameConvert(logger, frameConvertUseCase), 
-		logger, 
+		frameConverterCfg,
+		domain.TopicFrameReady,
+		handleFrameConvert(frameConvertUseCase),
+		logger,
 		&queue.ConsumerOptions{
-			MaxRetries: 2, 
-			RetryDelay: 300 * time.Millisecond, 
-			DLQ: dlqWriter, 
+			MaxRetries:         2,
+			RetryDelay:         300 * time.Millisecond,
+			DLQ:                dlqWriter,
 			CommitOnDLQFailure: true,
-			MaxDLQFails: 0,
+			MaxDLQFails:        0,
 		},
 	)
 
@@ -246,7 +246,7 @@ func main() {
 	assemblerConsumer := queue.NewConsumer(
 		assemblerKafkaCfg,
 		domain.TopicStreamEnded,
-		handleAssembly(logger, assemblerUseCase),
+		handleAssembly(assemblerUseCase),
 		logger,
 		&queue.ConsumerOptions{
 			MaxRetries:         10,
@@ -353,7 +353,6 @@ func main() {
 	}
 }
 
-
 func handleStreamStarted(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.HandlerFunc {
 	return func(ctx context.Context, msg kafka.Message) error {
 		var event domain.StreamStartedEvent
@@ -438,15 +437,17 @@ func parseAllowedOrigins() []string {
 
 func ensureStorage(startupCtx context.Context, logger *zap.Logger) *storage.Client {
 	storageEndpoint := os.Getenv("STORAGE_ENDPOINT")
-	if storageEndpoint == "" {
-		storageEndpoint = "localhost:9000"
-	}
-
 	storageCfg := storage.DefaultConfig(
 		storageEndpoint,
 		os.Getenv("STORAGE_ACCESS_KEY"),
 		os.Getenv("STORAGE_SECRET_KEY"),
 	)
+	if b := os.Getenv("STORAGE_FRAME_BUCKET"); b != "" {
+		storageCfg.FrameBucket = b
+	}
+	if b := os.Getenv("STORAGE_RECORDING_BUCKET"); b != "" {
+		storageCfg.RecordingBucket = b
+	}
 	storageCfg.UseSSL = os.Getenv("STORAGE_USE_SSL") == "true"
 	if presignMins := os.Getenv("STORAGE_PRESIGN_MINUTES"); presignMins != "" {
 		if m, err := strconv.Atoi(presignMins); err == nil {
@@ -463,7 +464,7 @@ func ensureStorage(startupCtx context.Context, logger *zap.Logger) *storage.Clie
 	return storageClient
 }
 
-func handleAssembly(logger *zap.Logger, uc *usecase.AssemblerUseCase) queue.HandlerFunc {
+func handleAssembly(uc *usecase.AssemblerUseCase) queue.HandlerFunc {
 	return func(ctx context.Context, msg kafka.Message) error {
 		var event domain.StreamEndedEvent
 		if err := json.Unmarshal(msg.Value, &event); err != nil {
@@ -473,7 +474,7 @@ func handleAssembly(logger *zap.Logger, uc *usecase.AssemblerUseCase) queue.Hand
 	}
 }
 
-func handleFrameConvert(logger *zap.Logger, uc *usecase.FrameConvertUseCase) queue.HandlerFunc {
+func handleFrameConvert(uc *usecase.FrameConvertUseCase) queue.HandlerFunc {
 	return func(ctx context.Context, msg kafka.Message) error {
 		var event domain.FrameReadyEvent
 		if err := json.Unmarshal(msg.Value, &event); err != nil {

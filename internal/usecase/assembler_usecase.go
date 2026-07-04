@@ -9,11 +9,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 
 	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
 	examgrpc "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
+	"github.com/vientrlenh/vox-streaming/internal/util"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -160,11 +160,10 @@ func (u *AssemblerUseCase) concat(ctx context.Context, concatPath, outputPath st
 }
 
 func (u *AssemblerUseCase) checkDiskSpace(dir string, requiredBytes uint64) error {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(dir, &stat); err != nil {
+	available, err := util.AvailableDiskSpace(dir)
+	if err != nil {
 		return nil
 	}
-	available := stat.Bavail * uint64(stat.Bsize)
 	if available < requiredBytes {
 		return fmt.Errorf("insufficient disk space: need %dMB, have %dMB", requiredBytes/1024/1024, available/1024/1024)
 	}

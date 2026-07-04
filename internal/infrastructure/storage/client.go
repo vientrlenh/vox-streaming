@@ -92,11 +92,17 @@ func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays 
 			return fmt.Errorf("check bucket %s: %w", bucket, err)
 		}
 
-		// không có bucket - tạo mới
-		if _, err := c.s3.CreateBucket(ctx, &s3.CreateBucketInput{
+		createInput := &s3.CreateBucketInput{
 			Bucket: aws.String(bucket),
-			
-		}); err != nil {
+		}
+		if c.cfg.Region != "" && c.cfg.Region != "us-east-1" {
+			createInput.CreateBucketConfiguration = &types.CreateBucketConfiguration{
+				LocationConstraint: types.BucketLocationConstraint(c.cfg.Region),
+			}
+		}
+
+		// không có bucket - tạo mới
+		if _, err := c.s3.CreateBucket(ctx, createInput); err != nil {
 			return fmt.Errorf("create bucket %s: %w", bucket, err)
 		}
 		c.logger.Info("bucket created", zap.String("bucket", bucket))
