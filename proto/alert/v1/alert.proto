@@ -15,6 +15,10 @@ message PushAlertRequest {
 	string alertType = 4;
 	float confidence = 5;
 	int64 capturedAtMs = 6;
+	string eventId = 7;
+	string streamType = 8;
+	string detail = 9;
+	int64 sequenceNo = 10;
 }
 
 message PushAlertResponse {

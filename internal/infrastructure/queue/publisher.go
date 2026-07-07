@@ -23,7 +23,8 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 		domain.TopicFrameReady,
 		domain.TopicStreamStarted,
 		domain.TopicStreamEnded,
-		domain.TopicRoomClosed,
+		domain.TopicRoomClosed, 
+		domain.TopicAlertRaised,
 	}
 
 	// frame events are high-volume and loss-tolerant — async is fine
@@ -89,6 +90,10 @@ func (p *Publisher) PublishStreamEnded(ctx context.Context, event domain.StreamE
 
 func (p *Publisher) PublishRoomClosed(ctx context.Context, event domain.RoomClosedEvent) error {
 	return p.publish(ctx, domain.TopicRoomClosed, event.RoomID, event)
+}
+
+func (p *Publisher) PublishAlertRaised(ctx context.Context, event domain.AlertRaisedEvent) error {
+	return p.publish(ctx, domain.TopicAlertRaised, event.RoomID, event)
 }
 
 func (p *Publisher) publish(ctx context.Context, topic, key string, payload any) error {

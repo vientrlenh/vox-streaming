@@ -465,7 +465,16 @@ func (p *Peer) close() {
 		}
 		if p.closedByFailure.Load() {
 			if err := p.monitorUseCase.PublishAlert(
-				ctx, p.roomID, p.participantID, p.streamID, domain.AlertStreamDropped, 1.0, time.Now().UTC(),
+				ctx, domain.AlertEvent{
+					Source: domain.AlertSourceStreaming, 
+					RoomID: p.roomID, 
+					ParticipantID: p.participantID, 
+					StreamID: p.streamID, 
+					StreamType: p.streamType, 
+					AlertType: domain.AlertStreamDropped, 
+					Confidence: 1.0, 
+					CapturedAt: time.Now().UTC(),
+				}, "",
 			); err != nil {
 				p.logger.Warn("stream dropped alert failed", zap.Error(err)) // stream continue running, no return
 			}

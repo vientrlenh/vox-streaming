@@ -10,6 +10,7 @@ const (
 	TopicStreamStarted = "exam.stream.started"
 	TopicStreamEnded   = "exam.stream.ended"
 	TopicRoomClosed    = "exam.room.closed"
+	TopicAlertRaised = "exam.alert.raised"
 )
 
 type FrameReadyEvent struct {
@@ -38,7 +39,7 @@ type StreamEndedEvent struct {
 	ParticipantID string    `json:"participantId"`
 	StreamID      string    `json:"streamId"`
 	StreamType    string    `json:"streamType"`
-	SegmentKeys   []string 	`json:"segmentKeys"`
+	SegmentKeys   []string  `json:"segmentKeys"`
 	Duration      int64     `json:"durationSecs"`
 	EndedAt       time.Time `json:"endedAt"`
 }
@@ -64,13 +65,42 @@ const (
 	ParticipantLeft   = "left"
 )
 
+type AlertLevel string
+
+const (
+	AlertLevelCritical AlertLevel = "CRITICAL"
+	AlertLevelWarning  AlertLevel = "WARNING"
+	AlertLevelInfo     AlertLevel = "INFO"
+)
+
+const (
+	AlertSourceAI = "ai"
+	AlertSourceStreaming = "streaming"
+)
+
+func DefaultAlertLevel(alertType string) AlertLevel {
+	switch alertType {
+	case AlertPhoneDetected, AlertMultiplePersons, AlertProhibitedObject: 
+		return AlertLevelCritical
+	case AlertFaceNotVisible, AlertSuspiciousGaze, AlertStreamDropped, AlertTrackEnded, AlertReconnectLoop: 
+		return AlertLevelWarning
+	default: 
+		return AlertLevelInfo
+	}
+}
+
 type AlertEvent struct {
-	RoomID        string    `json:"roomId"`
-	ParticipantID string    `json:"participantId"`
-	StreamID      string    `json:"streamId"`
-	AlertType     string    `json:"alertType"`
-	Confidence    float64   `json:"confidence"`
-	CapturedAt    time.Time `json:"capturedAt"`
+	Source        string     `json:"source"`
+	RoomID        string     `json:"roomId"`
+	ParticipantID string     `json:"participantId"`
+	StreamID      string     `json:"streamId"`
+	StreamType    string     `json:"streamType"`
+	AlertType     string     `json:"alertType"`
+	Detail        string     `json:"detail"`
+	Confidence    float64    `json:"confidence"`
+	SequenceNo    int64      `json:"sequenceNo"`
+	Level         AlertLevel `json:"level"`
+	CapturedAt    time.Time  `json:"capturedAt"`
 }
 
 const (
@@ -79,12 +109,19 @@ const (
 	AlertMultiplePersons = "MULTIPLE_PERSONS"
 	AlertFaceNotVisible  = "FACE_NOT_VISIBLE"
 	AlertSuspiciousGaze  = "SUSPICIOUS_GAZE"
+	AlertProhibitedObject = "PROHIBITED_OBJECT"
 
 	// Streaming service detect alerts
 	AlertStreamDropped = "STREAM_DROPPED"
 	AlertTrackEnded    = "TRACK_ENDED"
 	AlertReconnectLoop = "RECONNECT_LOOP"
 )
+
+type AlertRaisedEvent struct {
+	EventID  string    `json:"eventId"`
+	RaisedAt time.Time `json:"raisedAt"`
+	AlertEvent
+}
 
 type EventPublisher interface {
 	PublishFrameReady(ctx context.Context, event FrameReadyEvent) error

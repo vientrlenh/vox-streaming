@@ -49,6 +49,12 @@ var RequiredTopics = []TopicSpec{
 		ReplicationFactor: 1,
 		RetentionMS:       3600000,
 	},
+	{
+		Name: domain.TopicAlertRaised, 
+		NumPartitions: 6,
+		ReplicationFactor: 1,
+		RetentionMS: 604800000, // 7 days
+	},
 }
 
 func EnsureTopics(ctx context.Context, cfg Config, brokers []string, logger *zap.Logger) error {

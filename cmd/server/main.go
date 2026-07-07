@@ -100,7 +100,7 @@ func main() {
 	broadCaster := webrtctransport.NewRedisBroadcaster(redisClient, logger)
 
 	streamUseCase := usecase.NewStreamUseCase(publisher, sessionRegistry, logger)
-	monitorUseCase := usecase.NewMonitorUseCase(sessionRegistry, broadCaster, broadCaster, logger)
+	monitorUseCase := usecase.NewMonitorUseCase(sessionRegistry, broadCaster, broadCaster, publisher, logger)
 
 	alertServer := grpctransport.NewAlertServer(monitorUseCase, logger)
 
