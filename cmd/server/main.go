@@ -79,6 +79,8 @@ func main() {
 		frameIntervalSecs = 5
 	}
 
+	aiRelayQueueSize, _ := strconv.Atoi(os.Getenv("AI_RELAY_QUEUE_SIZE"))
+
 	allowedOrigins := parseAllowedOrigins()
 
 	jwtValidator, err := auth.NewValidator()
@@ -144,6 +146,11 @@ func main() {
 			ICEServers:    iceServers,
 			FrameInterval: time.Duration(frameIntervalSecs) * time.Second,
 			TempDir:       os.Getenv("SEGMENT_TEMP_DIR"),
+			AIRelay: webrtctransport.AIRelayOptions{
+				Enabled:   os.Getenv("AI_RELAY_ENABLED") == "true",
+				URL:       os.Getenv("AI_WEBRTC_URL"),
+				QueueSize: aiRelayQueueSize,
+			},
 		},
 		streamUseCase,
 		monitorUseCase,

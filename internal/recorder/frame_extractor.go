@@ -33,6 +33,11 @@ type fuaBuf struct {
 // dur is the picture duration in 90kHz ticks derived from RTP timestamps
 type NALSink func(nals [][]byte, hasIDR bool, dur uint32)
 
+
+// receive each parsed RTP packet to fan-out (relay to AI service)
+// Notes: don't keep the reference of packet when the method return -> payload stay in buffer re-use from ReadLoop. If want to use it, copy/marshal
+type RTPSink func(pkt *rtp.Packet)
+
 type FrameExtractor struct {
 	track *webrtc.TrackRemote
 	pc *webrtc.PeerConnection
@@ -44,7 +49,7 @@ type FrameExtractor struct {
 	idrNALs [][]byte //NAL units of the latest complete IDR picture
 	idrReady bool
 
-	idrCh chan struct{} // được thông báo khi có một IDR frame được buffer
+	idrCh chan struct{}  // notify when an IDR frame buffered
 
 	fua *fuaBuf // FU-A reassembly
 	picBuf  [][]byte // NALs accumulating for the current RTP picture
@@ -52,6 +57,7 @@ type FrameExtractor struct {
 	prevTS  uint32   // RTP timestamp of the previous committed picture
 	hasFirstPic bool
 	sink NALSink // optional, called for every complete picture
+	rtpSink RTPSink // optional, called for every RTP packet (fan-out relay)
 }
 
 func NewFrameExtractor(track *webrtc.TrackRemote, pc *webrtc.PeerConnection, logger *zap.Logger) *FrameExtractor {
@@ -71,6 +77,12 @@ func (fe *FrameExtractor) IDRReady() <-chan struct{} {
 // register sink to receive every picture for tier 2 recording
 func (fe *FrameExtractor) SetNALSink(sink NALSink) {
 	fe.sink = sink
+}
+
+
+// register sink to receive every RTP packet (use for relaying fan-out to AI)
+func (fe *FrameExtractor) SetRTPSink(sink RTPSink) {
+	fe.rtpSink = sink
 }
 
 func (fe *FrameExtractor) RequestKeyFrame() {
@@ -98,6 +110,9 @@ func (fe *FrameExtractor) ReadLoop(ctx context.Context) {
 		var pkt rtp.Packet
 		if err := pkt.Unmarshal(buf[:n]); err != nil {
 			continue
+		}
+		if fe.rtpSink != nil {
+			fe.rtpSink(&pkt) // fan-out relay: sink copy since the buf will be re-used
 		}
 		fe.ingest(&pkt)
 	}

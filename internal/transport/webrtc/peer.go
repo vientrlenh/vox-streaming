@@ -28,6 +28,7 @@ type PeerConfig struct {
 	ICEServers    []webrtc.ICEServer
 	FrameInterval time.Duration
 	TempDir       string
+	AIRelay       AIRelayOptions
 }
 
 type Peer struct {
@@ -50,6 +51,7 @@ type Peer struct {
 	monitorUseCase *usecase.MonitorUseCase
 	storage *storage.Client
 	recorder *recorder.SegmentedRecorder
+	aiRelay AIRelayOptions
 	logger  *zap.Logger
 
 	closedByFailure atomic.Bool
@@ -134,6 +136,7 @@ func NewPeer(
 		streamUseCase: streamUseCase,
 		monitorUseCase: monitorUseCase,
 		storage: storage,
+		aiRelay:       cfg.AIRelay,
 		done:          make(chan struct{}),
 		logger: logger.With(
 			zap.String("roomId", roomID),
@@ -239,7 +242,43 @@ func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
 			p.recorder.WriteVideoNALs(nals, hasIDR, dur)
 		})
 	}
-	
+
+	// tier 3: fan-out RTP to AI service for realtime proctoring (if turned on).
+	// always return non-fatal relay error, recording + capture frame does not depend on AI
+	if p.aiRelay.Enabled && p.aiRelay.URL != "" {
+		relay, err := NewAIRelay(ctx, AIRelayConfig{
+			BaseURL:     p.aiRelay.URL,
+			QueueSize:   p.aiRelay.QueueSize,
+			ICEServers:  p.aiRelay.ICEServers,
+			OnConnected: func() { fe.RequestKeyFrame() }, // After connected -> get keyframe from browser
+			OnPLI:       func() { fe.RequestKeyFrame() }, // Get keyframe -> redirect PLI to browser
+		},
+			track.Codec().RTPCodecCapability,
+			RelayMeta{
+				RoomID:        p.roomID,
+				ParticipantID: p.participantID,
+				StreamID:      p.streamID,
+				StreamType:    p.streamType,
+			},
+			p.logger,
+		)
+		if err != nil {
+			p.logger.Warn("ai relay init failed, tiếp tục không relay", zap.Error(err))
+		} else {
+			fe.SetRTPSink(func(pkt *rtp.Packet) {
+				raw, err := pkt.Marshal() // copy buf
+				if err != nil {
+					return
+				}
+				relay.Enqueue(raw)
+			})
+			go func() {
+				<-p.done
+				relay.Close()
+			}()
+		}
+	}
+
 	go func() {
 		<-p.done
 		cancel()
