@@ -1,0 +1,98 @@
+# docker-compose for the vox-streaming service ONLY.
+# Third-party dependencies (Redis, Kafka, MinIO/S3, coturn, the exam gRPC service)
+# are expected to run elsewhere and are reached via the addresses in .env.
+#
+#   docker compose up -d --build      # build image + start
+#   docker compose logs -f            # follow logs
+#   docker compose down               # stop
+#
+# ---------------------------------------------------------------------------
+# WEBRTC / NETWORKING NOTE (đọc kỹ):
+# The service is a WebRTC endpoint. Pion gathers media on EPHEMERAL UDP ports
+# and the code does not pin a fixed UDP range, so bridge networking + a handful
+# of published ports is NOT enough for media to flow.
+#
+#   * network_mode: host  ->  simplest & most reliable. The container shares the
+#     host's network stack, so all UDP media works and the localhost:* addresses
+#     in .env (Redis/Kafka on the same host) resolve directly. Linux only.
+#
+#   * If you cannot use host networking (Docker Desktop on Windows/macOS, or the
+#     deps live on other hosts), use the "bridge alternative" block at the bottom
+#     and make sure media is relayed through a reachable TURN server.
+# ---------------------------------------------------------------------------
+
+services:
+  vox-streaming:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vox-streaming:latest
+    container_name: vox-streaming
+
+    # Host networking: required for WebRTC UDP media. Linux only.
+    network_mode: host
+
+    # godotenv.Load() in cmd/server/main.go reads ./.env from the working dir and
+    # FATALS if the file is missing. Bind-mount it (read-only) so the container
+    # gets the same config without baking secrets into the image.
+    volumes:
+      - ./.env:/app/.env:ro
+      # Isolate segment/recording temp writes from the container layer (SEGMENT_TEMP_DIR=/app/tmp).
+      - vox-tmp:/app/tmp
+
+    # Reap zombie ffmpeg subprocesses (spawned by the recorder/assembler).
+    init: true
+
+    restart: unless-stopped
+
+    # Bound resources so a runaway assembly/ffmpeg job can't starve the host.
+    # Tune to your workload; remove if you don't want limits.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Liveness healthcheck is defined in the Dockerfile (hits /healthz on METRIC_ADDR).
+
+volumes:
+  vox-tmp:
+
+# ===========================================================================
+# BRIDGE ALTERNATIVE (non-Linux / deps on other hosts)
+# ---------------------------------------------------------------------------
+# Replace the block above with the one below if you can't use host networking.
+# Media then MUST relay through a TURN server reachable by both browser and
+# container (set TURN_URL/TURN_USERNAME/TURN_CREDENTIAL in .env). Update the
+# localhost:* addresses in .env to host.docker.internal (or real hostnames),
+# e.g. REDIS_ADDR=host.docker.internal:6379, KAFKA_BROKERS=host.docker.internal:9094.
+#
+#   vox-streaming:
+#     build:
+#       context: .
+#       dockerfile: Dockerfile
+#     image: vox-streaming:latest
+#     container_name: vox-streaming
+#     ports:
+#       - "8082:8082"        # HTTP / WebSocket signaling  (WEBRTC_ADDR)
+#       - "9096:9096"        # gRPC alert ingest           (GRPC_ADDR)
+#       - "9090:9090"        # metrics + health            (METRIC_ADDR)
+#     extra_hosts:
+#       - "host.docker.internal:host-gateway"   # let the container reach host services
+#     volumes:
+#       - ./.env:/app/.env:ro
+#       - vox-tmp:/app/tmp
+#     init: true
+#     restart: unless-stopped
+#     logging:
+#       driver: json-file
+#       options:
+#         max-size: "10m"
+#         max-file: "3"
+# ===========================================================================

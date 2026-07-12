@@ -1,0 +1,38 @@
+# Git / VCS
+.git
+.gitignore
+
+# Secrets & local env — never bake into an image layer.
+# The .env file is bind-mounted at runtime via docker-compose instead.
+.env
+*.env
+!.env.example
+
+# Docker artifacts
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Editor / IDE / OS
+.claude
+.vscode
+.idea
+.DS_Store
+
+# Build output / local binaries
+/vox-streaming
+/server
+*.exe
+/out
+/bin
+/dist
+
+# TLS material and local recordings/temp
+*.pem
+*.key
+*.crt
+/tmp
+/recordings
+
+# Docs
+*.md
