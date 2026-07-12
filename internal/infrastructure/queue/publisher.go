@@ -61,7 +61,13 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 					zap.String("msg", fmt.Sprintf(msg, args...)),
 				)
 			}),
-			Transport: transport,
+		}
+		// Only attach a Transport when one was actually built (TLS/SASL). Assigning
+		// a typed-nil *kafka.Transport to the RoundTripper interface field makes the
+		// interface non-nil, so kafka-go skips its DefaultTransport fallback and then
+		// dereferences the nil pointer -> panic on the first WriteMessages.
+		if transport != nil {
+			w.Transport = transport
 		}
 
 		writers[topic] = w

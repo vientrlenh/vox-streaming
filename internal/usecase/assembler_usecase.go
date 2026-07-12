@@ -177,7 +177,13 @@ func writeConcatList(path string, files []string) error {
 	}
 	defer f.Close()
 	for _, file := range files {
-		escaped := strings.ReplaceAll(file, "'", "'\\''")
+		// The concat demuxer resolves each entry relative to the directory of this
+		// list file, and the list + all segments live in the same job dir. Write
+		// basenames only: writing absolute paths breaks on Windows, where a
+		// drive-less path (\var\tmp\...) is treated as relative and the list dir is
+		// prepended, producing a doubled, non-existent path.
+		name := filepath.Base(file)
+		escaped := strings.ReplaceAll(name, "'", "'\\''")
 		fmt.Fprintf(f, "file '%s'\n", escaped)
 	}
 	return nil
