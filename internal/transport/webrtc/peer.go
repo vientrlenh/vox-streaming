@@ -25,6 +25,7 @@ const (
 )
 
 type PeerConfig struct {
+	API           *webrtc.API
 	ICEServers    []webrtc.ICEServer
 	FrameInterval time.Duration
 	TempDir       string
@@ -69,45 +70,9 @@ func NewPeer(
 	storage *storage.Client,
 	logger *zap.Logger,
 ) (*Peer, error) {
-	me := &webrtc.MediaEngine{}
-	
-	// Firefox, old Chrome
-	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType: webrtc.MimeTypeH264, 
-			ClockRate: 90000,
-			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
-		},
-		PayloadType: 102,
-	}, webrtc.RTPCodecTypeVideo); err != nil {
-		return nil, fmt.Errorf("H.264 codec register with level id 42e01f failed: %w", err)
-	}
-
-	// high profile: Chrome/Safari, better quality and bitrate
-	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType: webrtc.MimeTypeH264,
-			ClockRate: 90000, 
-			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640028",
-		},
-		PayloadType: 104,
-	}, webrtc.RTPCodecTypeVideo); err != nil {
-		return nil, fmt.Errorf("H.264 codec register with level id 640028 failed: %w", err)
-	}
-
-	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType: webrtc.MimeTypeOpus,
-			ClockRate: 48000,
-			Channels: 2,
-		},
-		PayloadType: 111,
-	}, webrtc.RTPCodecTypeAudio); err != nil {
-		return nil, fmt.Errorf("Opus codec register failed: %w", err)
-	}
-
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(me))
-	pc, err := api.NewPeerConnection(webrtc.Configuration{
+	// The API (MediaEngine + SettingEngine with the shared UDP mux) is built once
+	// at startup by NewWebRTCAPI and reused for every peer — see api.go.
+	pc, err := cfg.API.NewPeerConnection(webrtc.Configuration{
 		ICEServers: cfg.ICEServers,
 	})
 	if err != nil {

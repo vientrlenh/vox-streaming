@@ -79,6 +79,23 @@ func main() {
 		frameIntervalSecs = 5
 	}
 
+	// Build the shared WebRTC API once. WEBRTC_UDP_PORT muxes all peer media onto
+	// a single UDP port (expose just that port in containers); WEBRTC_NAT_1TO1_IP
+	// advertises the server's public IP for host candidates behind a 1:1 NAT.
+	webrtcUDPPort, _ := strconv.Atoi(os.Getenv("WEBRTC_UDP_PORT"))
+	var natIPs []string
+	if raw := os.Getenv("WEBRTC_NAT_1TO1_IP"); raw != "" {
+		natIPs = strings.Split(raw, ",")
+	}
+	webrtcAPI, webrtcAPIClose, err := webrtctransport.NewWebRTCAPI(webrtctransport.ICEConfig{
+		UDPPort:    webrtcUDPPort,
+		NAT1To1IPs: natIPs,
+	}, logger)
+	if err != nil {
+		logger.Fatal("webrtc api init failed", zap.Error(err))
+	}
+	defer webrtcAPIClose()
+
 	aiRelayQueueSize, _ := strconv.Atoi(os.Getenv("AI_RELAY_QUEUE_SIZE"))
 
 	allowedOrigins := parseAllowedOrigins()
@@ -143,6 +160,7 @@ func main() {
 
 	webrtcHandler := webrtctransport.NewHandler(
 		webrtctransport.PeerConfig{
+			API:           webrtcAPI,
 			ICEServers:    iceServers,
 			FrameInterval: time.Duration(frameIntervalSecs) * time.Second,
 			TempDir:       os.Getenv("SEGMENT_TEMP_DIR"),

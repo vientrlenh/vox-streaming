@@ -170,13 +170,14 @@ func (fe *FrameExtractor) ingestSTAPA(p []byte, marker bool) {
 	}
 }
 
-// handle FU-A fragmentation uints (RFC 6184 5.8)
+// handle FU-A fragmentation units (RFC 6184 5.8)
 func (fe *FrameExtractor) ingestFUA(p []byte, marker bool) {
 	if len(p) < 2 {
 		return
 	}
 	fuHeader := p[1]
 	startBit := fuHeader&0x80 != 0
+	endBit := fuHeader&0x40 != 0
 	fuNALType := fuHeader & 0x1F
 	payload := p[2:]
 
@@ -189,10 +190,13 @@ func (fe *FrameExtractor) ingestFUA(p []byte, marker bool) {
 	}
 	fe.fua.data = append(fe.fua.data, payload...)
 
-	if marker {
+	// A NAL is complete on the FU End bit — NOT the RTP marker (which ends the
+	// whole frame). Using the marker drops every non-last slice of a multi-slice
+	// picture. Commit the picture only when this is also the frame's last packet.
+	if endBit {
 		complete := fe.fua.data
 		fe.fua = nil
-		fe.addNAL(complete, true)
+		fe.addNAL(complete, marker)
 	}
 }
 

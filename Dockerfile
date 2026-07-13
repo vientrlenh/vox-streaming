@@ -57,8 +57,10 @@ EXPOSE 8082
 EXPOSE 9096
 # Prometheus metrics + health probes: /metrics /healthz /readyz (METRIC_ADDR)
 EXPOSE 9090
-# WebRTC media travels over UDP on ephemeral ports (Pion default, no fixed range
-# configured in code) -> run with host networking, or a TURN relay. See docker-compose.yml.
+# WebRTC media: set WEBRTC_UDP_PORT to mux all media onto ONE UDP port and publish
+# just that port (example below). Also set WEBRTC_NAT_1TO1_IP to the host's public
+# IP when running behind a 1:1 NAT so host candidates advertise a reachable address.
+EXPOSE 50000/udp
 
 # Liveness probe against the metrics server (/healthz never touches upstreams).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

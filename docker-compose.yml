@@ -8,17 +8,17 @@
 #
 # ---------------------------------------------------------------------------
 # WEBRTC / NETWORKING NOTE (đọc kỹ):
-# The service is a WebRTC endpoint. Pion gathers media on EPHEMERAL UDP ports
-# and the code does not pin a fixed UDP range, so bridge networking + a handful
-# of published ports is NOT enough for media to flow.
+# The service is a WebRTC endpoint. Set WEBRTC_UDP_PORT in .env so Pion muxes ALL
+# peer media onto that ONE UDP port — then you only need to publish/forward it.
 #
-#   * network_mode: host  ->  simplest & most reliable. The container shares the
-#     host's network stack, so all UDP media works and the localhost:* addresses
-#     in .env (Redis/Kafka on the same host) resolve directly. Linux only.
+#   * bridge networking (recommended, cross-platform):  publish the TCP ports +
+#     the single WEBRTC_UDP_PORT/udp, and set WEBRTC_NAT_1TO1_IP to the host's
+#     reachable IP so host candidates advertise an address the browser can hit.
+#     See the "bridge" block at the bottom.
 #
-#   * If you cannot use host networking (Docker Desktop on Windows/macOS, or the
-#     deps live on other hosts), use the "bridge alternative" block at the bottom
-#     and make sure media is relayed through a reachable TURN server.
+#   * network_mode: host  ->  also fine on Linux; the container shares the host
+#     stack so media + the localhost:* addresses in .env resolve directly. With
+#     the UDP mux you no longer NEED host mode, but it still works.
 # ---------------------------------------------------------------------------
 
 services:
@@ -65,13 +65,14 @@ volumes:
   vox-tmp:
 
 # ===========================================================================
-# BRIDGE ALTERNATIVE (non-Linux / deps on other hosts)
+# BRIDGE ALTERNATIVE (cross-platform, with the single-UDP-port mux)
 # ---------------------------------------------------------------------------
-# Replace the block above with the one below if you can't use host networking.
-# Media then MUST relay through a TURN server reachable by both browser and
-# container (set TURN_URL/TURN_USERNAME/TURN_CREDENTIAL in .env). Update the
-# localhost:* addresses in .env to host.docker.internal (or real hostnames),
-# e.g. REDIS_ADDR=host.docker.internal:6379, KAFKA_BROKERS=host.docker.internal:9094.
+# Replace the block above with the one below to run on a bridge network. In .env:
+#   WEBRTC_UDP_PORT=50000                # mux all media onto this one UDP port
+#   WEBRTC_NAT_1TO1_IP=<host public IP>  # advertise a browser-reachable host IP
+# and point the localhost:* deps at reachable hosts, e.g.
+#   REDIS_ADDR=host.docker.internal:6379, KAFKA_BROKERS=host.docker.internal:9094.
+# (A TURN server is only needed if the browser still can't reach WEBRTC_NAT_1TO1_IP.)
 #
 #   vox-streaming:
 #     build:
@@ -80,9 +81,10 @@ volumes:
 #     image: vox-streaming:latest
 #     container_name: vox-streaming
 #     ports:
-#       - "8082:8082"        # HTTP / WebSocket signaling  (WEBRTC_ADDR)
-#       - "9096:9096"        # gRPC alert ingest           (GRPC_ADDR)
-#       - "9090:9090"        # metrics + health            (METRIC_ADDR)
+#       - "8082:8082"          # HTTP / WebSocket signaling  (WEBRTC_ADDR)
+#       - "9096:9096"          # gRPC alert ingest           (GRPC_ADDR)
+#       - "9090:9090"          # metrics + health            (METRIC_ADDR)
+#       - "50000:50000/udp"    # WebRTC media mux            (WEBRTC_UDP_PORT)
 #     extra_hosts:
 #       - "host.docker.internal:host-gateway"   # let the container reach host services
 #     volumes:

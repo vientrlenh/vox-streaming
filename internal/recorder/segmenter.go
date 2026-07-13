@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
@@ -175,8 +176,18 @@ type SegmentedRecorder struct {
 	mu              sync.Mutex
 	current         *segmentWriter
 	segmentSeq      int64
-	audioEnabled    bool
-	hasVideo        bool
+	audioEnabled    atomic.Bool
+	hasVideo        atomic.Bool
+
+	// Writes are handed to writerLoop over writeCh so the RTP read goroutine
+	// never blocks on box-building or disk I/O (which would overflow the socket
+	// buffer and drop packets -> corrupt macroblocks, worst on high-bitrate
+	// screen share). A full queue drops a whole picture (a clean freeze) rather
+	// than losing mid-frame RTP packets.
+	writeCh    chan writeCmd
+	writerStop chan struct{}
+	writerDone chan struct{}
+	dropped    atomic.Int64
 
 	uploadWg sync.WaitGroup
 	resultMu sync.Mutex
@@ -186,6 +197,21 @@ type SegmentedRecorder struct {
 	stopCh   chan struct{}
 	rotateCh chan struct{}
 }
+
+// writeCmd is a queued recorder write (video picture or audio packet).
+type writeCmd struct {
+	video   bool
+	nals    [][]byte
+	hasIDR  bool
+	dur     uint32
+	payload []byte
+	samples uint32
+}
+
+// Bounds the queue between the RTP read path and the writer goroutine. Big
+// enough to absorb disk-write stalls (tens of frames), small enough to cap
+// memory — on sustained overload whole pictures are dropped instead.
+const writeQueueSize = 512
 
 func NewSegmentedRecorder(roomID, streamID, tempDir string, storage *storage.Client, logger *zap.Logger) (*SegmentedRecorder, error) {
 	first, err := newSegmentWriter(tempDir)
@@ -200,12 +226,60 @@ func NewSegmentedRecorder(roomID, streamID, tempDir string, storage *storage.Cli
 		logger:          logger,
 		segmentDuration: defaultSegmentDuration,
 		current:         first,
+		writeCh:         make(chan writeCmd, writeQueueSize),
+		writerStop:      make(chan struct{}),
+		writerDone:      make(chan struct{}),
 		stopCh:          make(chan struct{}),
 		rotateCh:        make(chan struct{}, 1),
 	}
 	r.ticker = time.NewTicker(r.segmentDuration)
 	go r.rotationLoop()
+	go r.writerLoop()
 	return r, nil
+}
+
+// writerLoop owns all segment writes (box building + disk I/O), off the RTP read
+// path. It drains any queued writes on stop so the final segment is complete.
+func (r *SegmentedRecorder) writerLoop() {
+	defer close(r.writerDone)
+	for {
+		select {
+		case cmd := <-r.writeCh:
+			r.applyWrite(cmd)
+		case <-r.writerStop:
+			for {
+				select {
+				case cmd := <-r.writeCh:
+					r.applyWrite(cmd)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+func (r *SegmentedRecorder) applyWrite(cmd writeCmd) {
+	r.mu.Lock()
+	if r.current == nil {
+		r.mu.Unlock()
+		return
+	}
+	if !cmd.video {
+		r.current.writeAudio(cmd.payload, cmd.samples)
+		r.mu.Unlock()
+		return
+	}
+	r.hasVideo.Store(true)
+	err := r.current.writeVideo(cmd.nals, cmd.hasIDR, cmd.dur)
+	r.mu.Unlock()
+	if err != nil {
+		r.logger.Warn("mp4 write error, triggering emergency rotation", zap.Error(err))
+		select {
+		case r.rotateCh <- struct{}{}:
+		default: // rotation already scheduled
+		}
+	}
 }
 
 func (r *SegmentedRecorder) rotationLoop() {
@@ -226,6 +300,10 @@ func (r *SegmentedRecorder) rotationLoop() {
 func (r *SegmentedRecorder) rotateSegment() {
 	r.mu.Lock()
 	old := r.current
+	if old == nil {
+		r.mu.Unlock() // recorder is finalizing; nothing to rotate
+		return
+	}
 	seq := r.segmentSeq
 	r.segmentSeq++
 	endedAt := time.Now().UTC()
@@ -316,49 +394,57 @@ func (r *SegmentedRecorder) uploadWithRetry(ctx context.Context, tmpPath string,
 
 // receives all NAL units of one complete picture
 // hasIDR must be true when nals contain an IDR frame
+//
+// Non-blocking: the picture is queued for writerLoop. The caller (RTP read loop)
+// never blocks. NAL byte slices are already owned copies from the extractor, so
+// they are safe to hand off. On a full queue the whole picture is dropped.
 func (r *SegmentedRecorder) WriteVideoNALs(nals [][]byte, hasIDR bool, dur uint32) {
-	r.mu.Lock()
-	if r.current == nil {
-		r.mu.Unlock()
-		return
-	}
-	r.hasVideo = true
-	err := r.current.writeVideo(nals, hasIDR, dur)
-	r.mu.Unlock()
-
-	if err != nil {
-		r.logger.Warn("mp4 write error, triggering emergency rotation", zap.Error(err))
-		select {
-		case r.rotateCh <- struct{}{}:
-		default: // rotation has been scheduled
+	select {
+	case r.writeCh <- writeCmd{video: true, nals: nals, hasIDR: hasIDR, dur: dur}:
+	default:
+		if n := r.dropped.Add(1); n%100 == 1 {
+			r.logger.Warn("recorder write queue full, dropping picture(s)", zap.Int64("droppedTotal", n))
 		}
 	}
 }
 
 // enable audio writing for subsequent segments
 func (r *SegmentedRecorder) StartAudio(_ uint8) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.audioEnabled = true
+	r.audioEnabled.Store(true)
 	return nil
 }
 
 // write one Opus RTP payload with its 48kHz sample count
+//
+// Non-blocking: payload is copied (the RTP read buffer is reused) and queued.
 func (r *SegmentedRecorder) WriteAudioPacket(payload []byte, sampleCount uint32) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.audioEnabled || r.current == nil {
+	if !r.audioEnabled.Load() {
 		return
 	}
-	r.current.writeAudio(payload, sampleCount)
+	cp := append([]byte(nil), payload...)
+	select {
+	case r.writeCh <- writeCmd{payload: cp, samples: sampleCount}:
+	default:
+		if n := r.dropped.Add(1); n%100 == 1 {
+			r.logger.Warn("recorder write queue full, dropping audio packet(s)", zap.Int64("droppedTotal", n))
+		}
+	}
+}
+
+// stop halts rotation and the writer goroutine, waiting for all queued writes to
+// be flushed into the current segment before returning.
+func (r *SegmentedRecorder) stop() {
+	r.stopOnce.Do(func() {
+		r.ticker.Stop()
+		close(r.stopCh)
+		close(r.writerStop)
+	})
+	<-r.writerDone
 }
 
 // stop rotation, uploads the last segment, and returns all segment metadata
 func (r *SegmentedRecorder) Finalize(ctx context.Context) ([]SegmentMeta, error) {
-	r.stopOnce.Do(func() {
-		r.ticker.Stop()
-		close(r.stopCh)
-	})
+	r.stop()
 
 	r.mu.Lock()
 	last := r.current
@@ -367,7 +453,7 @@ func (r *SegmentedRecorder) Finalize(ctx context.Context) ([]SegmentMeta, error)
 	r.current = nil
 	r.mu.Unlock()
 
-	if last != nil && r.hasVideo {
+	if last != nil && r.hasVideo.Load() {
 		r.uploadWg.Go(func() {
 			r.finalizeAndUpload(ctx, last, seq, time.Now().UTC())
 		})
@@ -391,10 +477,7 @@ func (r *SegmentedRecorder) Finalize(ctx context.Context) ([]SegmentMeta, error)
 
 // discard the current segment without uploading (stream failed)
 func (r *SegmentedRecorder) Close() {
-	r.stopOnce.Do(func() {
-		r.ticker.Stop()
-		close(r.stopCh)
-	})
+	r.stop()
 
 	r.mu.Lock()
 	current := r.current
