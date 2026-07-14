@@ -1,6 +1,7 @@
 package segment
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strconv"
@@ -15,14 +16,16 @@ const maxSegmentSize = 50 << 20 // 50 MB
 
 type SegmentHandler struct {
 	useCase *usecase.SegmentUseCase
+	assembler *usecase.AssemblerUseCase
 	validator *auth.Validator
 	logger *zap.Logger
 }
 
-func NewSegmentHandler(uc *usecase.SegmentUseCase, v *auth.Validator, logger *zap.Logger) *SegmentHandler {
+func NewSegmentHandler(uc *usecase.SegmentUseCase, assembler *usecase.AssemblerUseCase, v *auth.Validator, logger *zap.Logger) *SegmentHandler {
 	return &SegmentHandler{
 		useCase: uc,
-		validator: v, 
+		assembler: assembler,
+		validator: v,
 		logger: logger,
 	}
 }
@@ -118,10 +121,80 @@ func (h *SegmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.logger.Info("segment uploaded", 
-		zap.String("streamId", streamID), 
-		zap.Int64("seq", seq), 
+	h.logger.Info("segment uploaded",
+		zap.String("streamId", streamID),
+		zap.Int64("seq", seq),
 		zap.Int("sizeBytes", len(data)),
 	)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handle POST /stream/segment/complete
+// client signals it has finished uploading every chunk for this stream
+func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
+	token := r.Header.Get("Authorization")
+	if len(token) > 7 && token[:7] == "Bearer " {
+		token = token[7:]
+	}
+	claims, err := h.validator.Validate(token)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	q := r.URL.Query()
+	roomID := q.Get("roomId")
+	streamID := q.Get("streamId")
+	streamType := q.Get("streamType")
+
+	allowed := false
+	for _, id := range claims.RoomIDs {
+		if id == roomID {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		http.Error(w, "forbidden: wrong room", http.StatusForbidden)
+		return
+	}
+	if !claims.IsStudent() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if roomID == "" || streamID == "" || streamType == "" {
+		http.Error(w, "missing required params", http.StatusBadRequest)
+		return
+	}
+
+	req := usecase.SegmentUploadRequest{
+		StreamID: streamID,
+		ParticipantID: claims.UserID,
+		RoomID: roomID,
+		StreamType: streamType,
+	}
+	if err := h.useCase.MarkComplete(r.Context(), req); err != nil {
+		h.logger.Warn("mark segment complete failed",
+			zap.String("streamId", streamID),
+			zap.Error(err),
+		)
+		http.Error(w, "mark complete failed", http.StatusInternalServerError)
+		return
+	}
+
+	h.logger.Info("segment upload marked complete", zap.String("streamId", streamID))
+
+	// Assembly can take a while (download + ffmpeg + upload) - don't block the
+	// response on it. r.Context() is cancelled once we return, so use a fresh
+	// background context for the detached work.
+	go func() {
+		if err := h.assembler.Assemble(context.Background(), roomID, streamID); err != nil {
+			h.logger.Error("assembly after completion failed",
+				zap.String("streamId", streamID),
+				zap.Error(err),
+			)
+		}
+	}()
+
 	w.WriteHeader(http.StatusNoContent)
 }

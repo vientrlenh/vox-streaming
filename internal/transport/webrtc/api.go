@@ -56,7 +56,13 @@ func NewWebRTCAPI(cfg ICEConfig, logger *zap.Logger) (*webrtc.API, func() error,
 	}
 
 	if len(cfg.NAT1To1IPs) > 0 {
-		settingEngine.SetNAT1To1IPs(cfg.NAT1To1IPs, webrtc.ICECandidateTypeHost)
+		settingEngine.SetICEAddressRewriteRules(
+			webrtc.ICEAddressRewriteRule{
+				External: cfg.NAT1To1IPs, 
+				AsCandidateType: webrtc.ICECandidateTypeHost, 
+				Mode: webrtc.ICEAddressRewriteReplace,
+			},
+		)
 		logger.Info("webrtc NAT 1:1 host IPs set", zap.Strings("ips", cfg.NAT1To1IPs))
 	}
 

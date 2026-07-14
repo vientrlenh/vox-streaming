@@ -126,6 +126,10 @@ func (fw *fMP4Writer) buildMVHD() []byte {
 }
 
 func (fw *fMP4Writer) buildVideoTRAK(sps, pps []byte) []byte {
+	width, height, ok := parseSPSDimensions(sps)
+	if !ok {
+		width, height = 1920, 1080 // fallback to full HD resolution
+	}
 	tkhd := buildBox("tkhd", concat(
 		be32(0x00000003), // flags: enabled + in-movie
 		be32(0), be32(0), // creation, modification
@@ -135,7 +139,7 @@ func (fw *fMP4Writer) buildVideoTRAK(sps, pps []byte) []byte {
 		be32(0x00010000), be32(0), be32(0), 
 		be32(0), be32(0x00010000), be32(0),
 		be32(0), be32(0), be32(0x40000000), 
-		be32(0), be32(0), // width, height (from SPS)
+		be32(width<<16), be32(height<<16), // width, height (from SPS)
 	))
 	mdhd := buildBox("mdhd", concat(
 		be32(0), be32(0), be32(0), 
@@ -150,7 +154,7 @@ func (fw *fMP4Writer) buildVideoTRAK(sps, pps []byte) []byte {
 	avc1 := buildBox("avc1", concat(
 		make([]byte, 6), be16(1), // reserved + data_reference_index
 		make([]byte, 16), // pre_defined + reserved
-		be16(0), be16(0), // width, height
+		be16(uint16(width)), be16(uint16(height)), // width, height
 		be32(0x00480000), be32(0x00480000), // 72dpi
 		be32(0), be16(1), // reserved, frame_count
 		make([]byte, 32), // compressorname

@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
+	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
 	grpcclient "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
@@ -31,6 +32,7 @@ type Handler struct {
 	monitorUseCase 	*usecase.MonitorUseCase
 	upgrader  websocket.Upgrader
 	storage *storage.Client
+	segments *cache.SegmentRegistry
 	logger    *zap.Logger
 	validator *auth.Validator
 	broadcaster *RedisBroadcaster
@@ -61,14 +63,16 @@ func NewHandler(
 	validator *auth.Validator,
 	broadcaster *RedisBroadcaster, 
 	examClient *grpcclient.ExamClient, 
-	storage *storage.Client,
+	storage *storage.Client, 
+	segments *cache.SegmentRegistry, 
 ) *Handler {
 	return &Handler{
 		peerCfg:  peerCfg,
 		sessions: NewSessionManager(),
 		streamUseCase:  streamUseCase,
 		monitorUseCase: monitorUseCase,
-		storage: storage,
+		storage: storage, 
+		segments: segments, 
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  8192,
 			WriteBufferSize: 8192,
@@ -132,7 +136,7 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rawConn.Close()
 
-	peer, err := NewPeer(h.peerCfg, roomID, claims.UserID, streamType, h.streamUseCase, h.monitorUseCase, h.storage, h.logger)
+	peer, err := NewPeer(h.peerCfg, roomID, claims.UserID, streamType, h.streamUseCase, h.monitorUseCase, h.storage, h.segments, h.logger)
 	if err != nil {
 		h.logger.Error("peer creation failed", zap.Error(err))
 		_ = rawConn.WriteJSON(map[string]string{

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
@@ -22,10 +23,92 @@ const (
 	rtpNALTypeFUA   = 28
 )
 
+const minPLIInterval = 2 * time.Second
+
 var annexBStartCode = []byte{0x00, 0x00, 0x00, 0x01}
 
 type fuaBuf struct {
 	data []byte
+}
+
+// reorderBuffer resequences RTP packets so downstream NAL processing always
+// sees a monotonically increasing sequence number, absorbing the reordering
+// that NACK-triggered retransmission naturally introduces (a repaired packet
+// arrives later than packets that kept flowing while it was in flight).
+// Genuinely lost packets (no retransmission within reorderMaxWait) still
+// surface as a real gap to checkSeqGap, same as before.
+type reorderBuffer struct {
+	pending  map[uint16]*rtp.Packet
+	nextSeq  uint16
+	hasNext  bool
+	gapSince time.Time
+}
+
+const (
+	reorderMaxWait = 120 * time.Millisecond // budget for one NACK round-trip
+	reorderMaxHold = 64                     // bound memory under pathological loss bursts
+)
+
+// push returns pkt (and any now-contiguous packets it unblocked) in sequence
+// order. Returns nil if pkt is buffered pending an earlier gap, or discarded
+// as a duplicate / already-past packet.
+func (rb *reorderBuffer) push(pkt *rtp.Packet) []*rtp.Packet {
+	if rb.pending == nil {
+		rb.pending = make(map[uint16]*rtp.Packet)
+	}
+	if !rb.hasNext {
+		rb.nextSeq = pkt.SequenceNumber
+		rb.hasNext = true
+	}
+
+	delta := int32(int16(pkt.SequenceNumber - rb.nextSeq))
+	if delta < 0 {
+		return nil // duplicate, or arrived after we already gave up on this seq
+	}
+	if delta > 0 {
+		if len(rb.pending) == 0 {
+			rb.gapSince = time.Now()
+		}
+		rb.pending[pkt.SequenceNumber] = pkt
+		if len(rb.pending) >= reorderMaxHold || time.Since(rb.gapSince) >= reorderMaxWait {
+			return rb.giveUpAndDrain()
+		}
+		return nil
+	}
+
+	// delta == 0: exactly what we're waiting for
+	out := []*rtp.Packet{pkt}
+	rb.nextSeq++
+	for {
+		next, ok := rb.pending[rb.nextSeq]
+		if !ok {
+			break
+		}
+		delete(rb.pending, rb.nextSeq)
+		out = append(out, next)
+		rb.nextSeq++
+	}
+	return out
+}
+
+// giveUpAndDrain abandons the current gap (nextSeq is presumed permanently
+// lost), advances past it, and drains any now-contiguous run from pending.
+func (rb *reorderBuffer) giveUpAndDrain() []*rtp.Packet {
+	rb.nextSeq++
+	var out []*rtp.Packet
+	for {
+		next, ok := rb.pending[rb.nextSeq]
+		if !ok {
+			break
+		}
+		delete(rb.pending, rb.nextSeq)
+		out = append(out, next)
+		rb.nextSeq++
+	}
+	if len(rb.pending) > 0 {
+		rb.gapSince = time.Now() // another gap remains, restart its wait budget
+	}
+	return out
 }
 
 // receive all NAL units each completed picture
@@ -55,7 +138,16 @@ type FrameExtractor struct {
 	picBuf  [][]byte // NALs accumulating for the current RTP picture
 	picTS   uint32   // RTP timestamp of the picture being assembled
 	prevTS  uint32   // RTP timestamp of the previous committed picture
-	hasFirstPic bool
+	hasFirstPic bool 
+
+	prevSeq uint16 
+	hasPrevSeq bool 
+	lostPackets uint64 // number of lost packets
+
+	pictureCorrupted bool
+	lastRecoveryPLI time.Time
+	reorder reorderBuffer
+
 	sink NALSink // optional, called for every complete picture
 	rtpSink RTPSink // optional, called for every RTP packet (fan-out relay)
 }
@@ -86,6 +178,14 @@ func (fe *FrameExtractor) SetRTPSink(sink RTPSink) {
 }
 
 func (fe *FrameExtractor) RequestKeyFrame() {
+	fe.mu.Lock()
+	if time.Since(fe.lastRecoveryPLI) < minPLIInterval { 
+		fe.mu.Unlock()
+		return
+	}
+	fe.lastRecoveryPLI = time.Now()
+	fe.mu.Unlock()
+
 	if err := fe.pc.WriteRTCP([]rtcp.Packet{
 		&rtcp.PictureLossIndication{
 			MediaSSRC: uint32(fe.track.SSRC()),
@@ -118,7 +218,56 @@ func (fe *FrameExtractor) ReadLoop(ctx context.Context) {
 	}
 }
 
+func (fe *FrameExtractor) checkSeqGap(pkt *rtp.Packet) bool {
+	if !fe.hasPrevSeq {
+		fe.prevSeq = pkt.SequenceNumber 
+		fe.hasPrevSeq = true
+		return false
+	}
+
+	delta := int32(int16(pkt.SequenceNumber - fe.prevSeq))
+
+	switch {
+	case delta == 1:
+		fe.prevSeq = pkt.SequenceNumber
+		return false
+	case delta > 1: 
+		lost := uint64(delta - 1)
+		fe.lostPackets += lost
+		fe.logger.Warn("RTP sequence gap detected (likely packet loss)", 
+			zap.Uint16("seq", pkt.SequenceNumber), 
+			zap.Int32("lostCount", delta-1),
+			zap.Uint32("rtpTimestamp", pkt.Timestamp), 
+			zap.Uint64("totalLost", fe.lostPackets),
+		)
+		fe.prevSeq = pkt.SequenceNumber
+		return true
+	default: 
+		fe.logger.Warn("RTP packet out of order or duplicate", 
+			zap.Uint16("seq", pkt.SequenceNumber), 
+			zap.Int32("delta", delta), 
+			zap.Uint32("rtpTimestamp", pkt.Timestamp),
+		)
+		return true
+	}
+}
+
+// ingest is the ReadLoop entry point. The reorder buffer can retain pkt
+// across multiple ReadLoop iterations while waiting for an earlier gap to
+// fill (NACK retransmit), but pkt.Payload aliases ReadLoop's reused read
+// buffer — clone it before it can be retained past this call.
 func (fe *FrameExtractor) ingest(pkt *rtp.Packet) {
+	cloned := *pkt
+	cloned.Payload = append([]byte(nil), pkt.Payload...)
+	for _, ordered := range fe.reorder.push(&cloned) {
+		fe.ingestOrdered(ordered)
+	}
+}
+
+func (fe *FrameExtractor) ingestOrdered(pkt *rtp.Packet) {
+	if fe.checkSeqGap(pkt) && (len(fe.picBuf) > 0 || fe.fua != nil) {
+		fe.pictureCorrupted = true
+	}
 	fe.picTS = pkt.Timestamp
 	p := pkt.Payload
 	if len(p) == 0 {
@@ -216,6 +365,16 @@ func (fe *FrameExtractor) commitPicture() {
 	}
 	fe.prevTS = fe.picTS
 	fe.hasFirstPic = true
+
+	if fe.pictureCorrupted {
+		fe.pictureCorrupted = false
+		fe.picBuf = nil 
+		fe.logger.Warn("dropping picture reassembled from lost/out-of-order RTP packets", 
+			zap.Uint32("rtpTimestamp", fe.picTS),
+		)
+		fe.RequestKeyFrame()
+		return
+	}
 
 	hasIDR := false
 	for _, n := range fe.picBuf {

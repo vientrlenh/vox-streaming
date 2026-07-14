@@ -86,32 +86,53 @@ func (u *SegmentUseCase) Audit(ctx context.Context, streamID string) (*StreamAud
 		return nil, err
 	}
 	audit := &StreamAudit{
-		StreamID: streamID, 
+		StreamID: streamID,
 		TotalSegments: len(metas),
 	}
 	if len(metas) == 0 {
 		return audit, nil
 	}
 
+	audit.Gaps, audit.RecordedDuration = auditGaps(metas)
+	audit.HasGaps = len(audit.Gaps) > 0
+	return audit, nil
+}
+
+// auditGaps computes gaps (>2s between consecutive segments) and total
+// recorded duration (sum of each segment's own span). metas must already be
+// sorted by Seq — cache.SegmentRegistry.List guarantees this. Shared between
+// Audit and AssemblerUseCase.Assemble so both use the same gap definition.
+func auditGaps(metas []cache.SegmentMeta) ([]SegmentGap, time.Duration) {
+	var gaps []SegmentGap
 	var totalRecorded time.Duration
 	for i, m := range metas {
-		dur := m.EndedAt.Sub(m.StartedAt)
-		totalRecorded += dur
-
+		totalRecorded += m.EndedAt.Sub(m.StartedAt)
 		if i == 0 {
 			continue
 		}
 		prev := metas[i-1]
 		gap := m.StartedAt.Sub(prev.EndedAt)
 		if gap > 2*time.Second {
-			audit.Gaps = append(audit.Gaps, SegmentGap{
-				FromSeq: prev.Seq, 
-				ToSeq: m.Seq,
+			gaps = append(gaps, SegmentGap{
+				FromSeq: prev.Seq,
+				ToSeq:   m.Seq,
 				Missing: gap,
 			})
 		}
 	}
-	audit.RecordedDuration = totalRecorded
-	audit.HasGaps = len(audit.Gaps) > 0
-	return audit, nil
+	return gaps, totalRecorded
+}
+
+// MarkComplete records that the client has finished uploading all segments
+// for this stream, letting AssemblerUseCase.OnStreamEnded take the fast path
+// instead of waiting out the grace period.
+func (u *SegmentUseCase) MarkComplete(ctx context.Context, req SegmentUploadRequest) error {
+	session, err := u.sessions.Lookup(ctx, req.RoomID, req.ParticipantID, req.StreamType)
+	if err != nil || session == nil {
+		return fmt.Errorf("no active session for participant %s in room %s", req.ParticipantID, req.RoomID)
+	}
+	if session.StreamID != req.StreamID {
+		return fmt.Errorf("streamId mismatch: expected %s, got %s", session.StreamID, req.StreamID)
+	}
+	return u.segments.MarkComplete(ctx, req.StreamID)
 }

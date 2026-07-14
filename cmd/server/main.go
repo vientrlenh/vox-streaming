@@ -156,7 +156,19 @@ func main() {
 	storageClient := ensureStorage(startupCtx, logger)
 	segmentRegistry := cache.NewSegmentRegistry(redisClient)
 	segmentUseCase := usecase.NewSegmentUseCase(storageClient, segmentRegistry, sessionRegistry, logger)
-	segmentHandler := segmenttransport.NewSegmentHandler(segmentUseCase, jwtValidator, logger)
+
+	// grace period the assembler waits after stream.ended for a client
+	// completion signal before assembling with whatever segments have arrived
+	assemblyGraceSecs, _ := strconv.Atoi(os.Getenv("ASSEMBLY_GRACE_PERIOD_SECS"))
+	if assemblyGraceSecs == 0 {
+		assemblyGraceSecs = 90
+	}
+	assemblerUseCase := usecase.NewAssemblerUseCase(
+		storageClient, examClient, segmentRegistry,
+		time.Duration(assemblyGraceSecs)*time.Second,
+		logger,
+	)
+	segmentHandler := segmenttransport.NewSegmentHandler(segmentUseCase, assemblerUseCase, jwtValidator, logger)
 
 	webrtcHandler := webrtctransport.NewHandler(
 		webrtctransport.PeerConfig{
@@ -177,7 +189,8 @@ func main() {
 		jwtValidator,
 		broadCaster,
 		examClient,
-		storageClient,
+		storageClient, 
+		segmentRegistry, 
 	)
 
 	addr := os.Getenv("WEBRTC_ADDR")
@@ -267,7 +280,6 @@ func main() {
 	assemblerKafkaCfg := kafkaCfg
 	assemblerKafkaCfg.GroupID = "vox-assembler"
 
-	assemblerUseCase := usecase.NewAssemblerUseCase(storageClient, examClient, logger)
 	assemblerConsumer := queue.NewConsumer(
 		assemblerKafkaCfg,
 		domain.TopicStreamEnded,
@@ -495,7 +507,7 @@ func handleAssembly(uc *usecase.AssemblerUseCase) queue.HandlerFunc {
 		if err := json.Unmarshal(msg.Value, &event); err != nil {
 			return fmt.Errorf("unmarshal stream ended for assembly: %w", err)
 		}
-		return uc.Assemble(ctx, event)
+		return uc.OnStreamEnded(ctx, event.RoomID, event.StreamID)
 	}
 }
 

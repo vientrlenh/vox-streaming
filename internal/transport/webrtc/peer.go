@@ -11,6 +11,7 @@ import (
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
+	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
 	"github.com/vientrlenh/vox-streaming/internal/recorder"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
@@ -51,6 +52,8 @@ type Peer struct {
 	streamUseCase *usecase.StreamUseCase
 	monitorUseCase *usecase.MonitorUseCase
 	storage *storage.Client
+	segments *cache.SegmentRegistry
+
 	recorder *recorder.SegmentedRecorder
 	aiRelay AIRelayOptions
 	logger  *zap.Logger
@@ -67,7 +70,8 @@ func NewPeer(
 	roomID, participantID, streamType string,
 	streamUseCase *usecase.StreamUseCase, 
 	monitorUseCase *usecase.MonitorUseCase,
-	storage *storage.Client,
+	storage *storage.Client, 
+	segments *cache.SegmentRegistry, 
 	logger *zap.Logger,
 ) (*Peer, error) {
 	// The API (MediaEngine + SettingEngine with the shared UDP mux) is built once
@@ -100,7 +104,8 @@ func NewPeer(
 		frameInterval: fi,
 		streamUseCase: streamUseCase,
 		monitorUseCase: monitorUseCase,
-		storage: storage,
+		storage: storage, 
+		segments: segments,
 		aiRelay:       cfg.AIRelay,
 		done:          make(chan struct{}),
 		logger: logger.With(
@@ -424,6 +429,25 @@ func (p *Peer) close() {
 				} else {
 					for _, s := range segments {
 						segmentKeys = append(segmentKeys, s.S3Key)
+						if p.segments != nil {
+							if err := p.segments.Add(ctx, p.streamID, cache.SegmentMeta{
+								Seq: s.Seq, 
+								S3Key: s.S3Key, 
+								StartedAt: s.StartedAt, 
+								EndedAt: s.EndedAt, 
+								UploadedAt: time.Now().UTC(),
+							}); err != nil {
+								p.logger.Warn("register server segment failed", 
+									zap.Int64("seq", s.Seq), 
+									zap.Error(err), 
+								)
+							}
+						}
+					}
+					if p.segments != nil && len(segments) > 0 {
+						if err := p.segments.MarkComplete(ctx, p.streamID); err != nil {
+							p.logger.Warn("mark server recording complete failed", zap.Error(err))
+						}
 					}
 				}
 			}

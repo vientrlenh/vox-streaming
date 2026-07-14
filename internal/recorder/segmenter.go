@@ -179,11 +179,6 @@ type SegmentedRecorder struct {
 	audioEnabled    atomic.Bool
 	hasVideo        atomic.Bool
 
-	// Writes are handed to writerLoop over writeCh so the RTP read goroutine
-	// never blocks on box-building or disk I/O (which would overflow the socket
-	// buffer and drop packets -> corrupt macroblocks, worst on high-bitrate
-	// screen share). A full queue drops a whole picture (a clean freeze) rather
-	// than losing mid-frame RTP packets.
 	writeCh    chan writeCmd
 	writerStop chan struct{}
 	writerDone chan struct{}

@@ -67,6 +67,22 @@ func (r *SegmentRegistry) List(ctx context.Context, streamID string) ([]SegmentM
 	return metas, nil
 }
 
+func (r *SegmentRegistry) MarkComplete(ctx context.Context, streamID string) error {
+	return r.client.Set(ctx, completeKey(streamID), "1", segmentTTL).Err()
+}
+
+func (r *SegmentRegistry) IsComplete(ctx context.Context, streamID string) (bool, error) {
+	n, err := r.client.Exists(ctx, completeKey(streamID)).Result()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func segmentKey(streamID string) string {
 	return fmt.Sprintf("stream:%s:segments", streamID)
+}
+
+func completeKey(streamID string) string {
+	return fmt.Sprintf("stream:%s:complete", streamID)
 }
