@@ -121,6 +121,11 @@ type NALSink func(nals [][]byte, hasIDR bool, dur uint32)
 // Notes: don't keep the reference of packet when the method return -> payload stay in buffer re-use from ReadLoop. If want to use it, copy/marshal
 type RTPSink func(pkt *rtp.Packet)
 
+// receive each raw RTP packet (pre-unmarshal bytes) to fan-out to the ffmpeg
+// ingest bridge. Same aliasing rule as RTPSink: the slice is ReadLoop's reused
+// read buffer, do not retain it past the call — copy if needed.
+type RawSink func(raw []byte)
+
 type FrameExtractor struct {
 	track *webrtc.TrackRemote
 	pc *webrtc.PeerConnection
@@ -150,6 +155,7 @@ type FrameExtractor struct {
 
 	sink NALSink // optional, called for every complete picture
 	rtpSink RTPSink // optional, called for every RTP packet (fan-out relay)
+	rawSink RawSink // optional, called with every raw RTP packet (ffmpeg ingest fan-out)
 }
 
 func NewFrameExtractor(track *webrtc.TrackRemote, pc *webrtc.PeerConnection, logger *zap.Logger) *FrameExtractor {
@@ -175,6 +181,14 @@ func (fe *FrameExtractor) SetNALSink(sink NALSink) {
 // register sink to receive every RTP packet (use for relaying fan-out to AI)
 func (fe *FrameExtractor) SetRTPSink(sink RTPSink) {
 	fe.rtpSink = sink
+}
+
+// register sink to receive every raw RTP packet (use for ffmpeg ingest
+// fan-out — see peer.go's ffmpegIngestState). FrameExtractor is the sole
+// reader of the underlying track; this lets a second consumer piggyback on
+// that single read instead of racing it with its own track.Read/ReadRTP call.
+func (fe *FrameExtractor) SetRawSink(sink RawSink) {
+	fe.rawSink = sink
 }
 
 func (fe *FrameExtractor) RequestKeyFrame() {
@@ -206,6 +220,9 @@ func (fe *FrameExtractor) ReadLoop(ctx context.Context) {
 		n, _, err := fe.track.Read(buf)
 		if err != nil {
 			return
+		}
+		if fe.rawSink != nil {
+			fe.rawSink(buf[:n]) // fan-out to ffmpeg ingest before unmarshal
 		}
 		var pkt rtp.Packet
 		if err := pkt.Unmarshal(buf[:n]); err != nil {

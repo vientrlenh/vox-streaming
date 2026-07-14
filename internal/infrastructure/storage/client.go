@@ -220,6 +220,25 @@ func (c *Client) UploadServerSegment(ctx context.Context, roomID, streamID strin
 	return key, nil
 }
 
+func ffmpegSegmentKey(roomID, streamID string, seq int64) string {
+	return fmt.Sprintf("rooms/%s/streams/%s/ffmpeg-segments/%04d.mp4", roomID, streamID, seq)
+}
+
+
+func (c *Client) UploadFFmpegSegment(ctx context.Context, roomID, streamID string, seq int64, r io.Reader) (string, error) {
+	key := ffmpegSegmentKey(roomID, streamID, seq)
+	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(c.cfg.RecordingBucket),
+		Key:         aws.String(key),
+		Body:        r,
+		ContentType: aws.String("video/mp4"),
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload ffmpeg segment: %w", err)
+	}
+	return key, nil
+}
+
 func finalRecordingKey(roomID, streamID string) string {
 	return fmt.Sprintf("rooms/%s/streams/%s/recording.mp4", roomID, streamID)
 }

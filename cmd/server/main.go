@@ -19,6 +19,7 @@ import (
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/queue"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
+	"github.com/vientrlenh/vox-streaming/internal/recorder/ffmpegingest"
 	grpcclient "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
 	grpctransport "github.com/vientrlenh/vox-streaming/internal/transport/grpc/server"
 	httpRoute "github.com/vientrlenh/vox-streaming/internal/transport/http"
@@ -170,6 +171,8 @@ func main() {
 	)
 	segmentHandler := segmenttransport.NewSegmentHandler(segmentUseCase, assemblerUseCase, jwtValidator, logger)
 
+	ffmpegIngestOpts := buildFFmpegIngestOptions(logger)
+
 	webrtcHandler := webrtctransport.NewHandler(
 		webrtctransport.PeerConfig{
 			API:           webrtcAPI,
@@ -181,6 +184,7 @@ func main() {
 				URL:       os.Getenv("AI_WEBRTC_URL"),
 				QueueSize: aiRelayQueueSize,
 			},
+			FFmpegIngest: ffmpegIngestOpts,
 		},
 		streamUseCase,
 		monitorUseCase,
@@ -470,6 +474,54 @@ func parseAllowedOrigins() []string {
 		}
 	}
 	return origins
+}
+
+
+func buildFFmpegIngestOptions(logger *zap.Logger) webrtctransport.FFmpegIngestOptions {
+	if os.Getenv("FFMPEG_INGEST_ENABLED") != "true" {
+		return webrtctransport.FFmpegIngestOptions{}
+	}
+	rangeStart, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_PORT_RANGE_START"))
+	if rangeStart == 0 {
+		rangeStart = 40000
+	}
+	rangeEnd, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_PORT_RANGE_END"))
+	if rangeEnd == 0 {
+		rangeEnd = 41999
+	}
+	alloc, err := ffmpegingest.NewPortAllocator(rangeStart, rangeEnd)
+	if err != nil {
+		logger.Warn("ffmpeg ingest bridge disabled: port allocator init failed", zap.Error(err))
+		return webrtctransport.FFmpegIngestOptions{}
+	}
+
+	segmentSeconds, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_SEGMENT_SECONDS"))
+	if segmentSeconds == 0 {
+		segmentSeconds = 30 // matches SegmentedRecorder's defaultSegmentDuration
+	}
+	maxConcurrent, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_MAX_CONCURRENT"))
+	if maxConcurrent == 0 {
+		maxConcurrent = 10
+	}
+	maxRestartAttempts, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_MAX_RESTART_ATTEMPTS"))
+	if maxRestartAttempts == 0 {
+		maxRestartAttempts = 3
+	}
+
+	logger.Info("ffmpeg ingest bridge enabled (cutover, RECORDING.md §11)",
+		zap.Int("portRangeStart", rangeStart),
+		zap.Int("portRangeEnd", rangeEnd),
+		zap.Int("segmentSeconds", segmentSeconds),
+		zap.Int("maxConcurrentRecorders", maxConcurrent),
+		zap.Int("maxRestartAttempts", maxRestartAttempts),
+	)
+	return webrtctransport.FFmpegIngestOptions{
+		Enabled:            true,
+		Allocator:          alloc,
+		RecordSem:          make(chan struct{}, maxConcurrent),
+		SegmentSeconds:     segmentSeconds,
+		MaxRestartAttempts: maxRestartAttempts,
+	}
 }
 
 func ensureStorage(startupCtx context.Context, logger *zap.Logger) *storage.Client {
