@@ -17,7 +17,6 @@ import (
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
 	"github.com/vientrlenh/vox-streaming/internal/recorder"
-	"github.com/vientrlenh/vox-streaming/internal/recorder/ffmpegingest"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
 	"go.uber.org/zap"
 )
@@ -40,10 +39,11 @@ type PeerConfig struct {
 
 
 type FFmpegIngestOptions struct {
-	Enabled            bool
-	Allocator          *ffmpegingest.PortAllocator
+	Allocator          *recorder.PortAllocator
 	RecordSem          chan struct{} // capacity = max concurrent ffmpeg recorders across all peers
 	SegmentSeconds     int
+	ReorderQueueSize   int // ffmpeg -reorder_queue_size; <= 0 uses ffmpegingest's default (256)
+	MaxDelayMicros     int // ffmpeg -max_delay (microseconds); <= 0 uses ffmpegingest's default (500000)
 	MaxRestartAttempts int
 	StopTimeout        time.Duration // grace period for ffmpeg to quit gracefully at stream end before being force-killed
 }
@@ -57,14 +57,22 @@ type ffmpegIngestState struct {
 	videoReceiver *webrtc.RTPReceiver
 	audioTrack    *webrtc.TrackRemote
 	audioReceiver *webrtc.RTPReceiver
-	session       *ffmpegingest.Session
+	session       *recorder.Session
 	sessionStarting bool // claimed under mu while StartSession/StartRecorderSupervisor run, before session is set — closes the race where video's and audio's OnTrack goroutines both see session == nil
-	supervisor    *ffmpegingest.RecorderSupervisor
+	supervisor    *recorder.RecorderSupervisor
 	recordSlotHeld bool // true once a RecordSem slot was acquired for this stream
 
 	segMu      sync.Mutex
 	segs       []cache.SegmentMeta
 	uploadDone chan struct{}
+
+	// incomplete is set true the moment we know the final recording can't
+	// possibly cover the whole stream — a segment upload failed permanently,
+	// a segment failed to register in SegmentRegistry, or close() gave up
+	// waiting for the uploader to drain. Recording must not be marked
+	// complete once this is set, even though the ffmpeg process itself may
+	// have run and exited perfectly cleanly.
+	incomplete atomic.Bool
 }
 
 
@@ -107,7 +115,6 @@ type Peer struct {
 	storage *storage.Client
 	segments *cache.SegmentRegistry
 
-	recorder *recorder.SegmentedRecorder
 	aiRelay AIRelayOptions
 	ffmpegIngestCfg FFmpegIngestOptions
 	ffmpegIngest    *ffmpegIngestState // nil when FFmpegIngest is disabled
@@ -173,16 +180,8 @@ func NewPeer(
 		),
 	}
 	p.closedByFailure.Store(false)
-	if cfg.FFmpegIngest.Enabled && cfg.FFmpegIngest.Allocator != nil {
+	if cfg.FFmpegIngest.Allocator != nil {
 		p.ffmpegIngest = &ffmpegIngestState{}
-	}
-	if storage != nil {
-		rec, err := recorder.NewSegmentedRecorder(roomID, streamID, cfg.TempDir, storage, logger)
-		if err != nil {
-			logger.Warn("recorder init failed, recording disabled", zap.Error(err))
-		} else {
-			p.recorder = rec
-		}
 	}
 	p.setupCallbacks()
 	return p, nil
@@ -257,9 +256,21 @@ func (p *Peer) noteFFmpegIngestTrack(video bool, track *webrtc.TrackRemote, rece
 		return
 	}
 
-	session, err := ffmpegingest.StartSession(context.Background(), p.ffmpegIngestCfg.Allocator, p.tempDir, vt, vr, at, ar, p.logger)
+	// cheap fast-path: don't bother spinning up ffmpeg at all if the peer is
+	// already gone (e.g. both tracks arrived right as the client disconnected).
+	// Not required for correctness on its own — the commit-time check below is
+	// what actually closes the race — but avoids wasted work in the common case.
+	select {
+	case <-p.done:
+		p.abortFFmpegIngestStart(st)
+		return
+	default:
+	}
+
+	session, err := recorder.StartSession(context.Background(), p.ffmpegIngestCfg.Allocator, p.tempDir, vt, vr, at, ar, p.logger)
 	if err != nil {
 		p.logger.Warn("ffmpeg ingest bridge start failed", zap.Error(err))
+		p.abortFFmpegIngestStart(st)
 		return
 	}
 
@@ -268,6 +279,7 @@ func (p *Peer) noteFFmpegIngestTrack(video bool, track *webrtc.TrackRemote, rece
 	default:
 		p.logger.Warn("ffmpeg ingest max concurrent recorders reached, skipping ffmpeg recording for this stream")
 		session.Close()
+		p.abortFFmpegIngestStart(st)
 		return
 	}
 
@@ -280,17 +292,52 @@ func (p *Peer) noteFFmpegIngestTrack(video bool, track *webrtc.TrackRemote, rece
 	}
 
 	outDir := filepath.Join(p.tempDir, "ffmpeg-ingest", p.streamID)
-	sup, err := ffmpegingest.StartRecorderSupervisor(session.SDPPath(), outDir, p.ffmpegIngestCfg.SegmentSeconds, p.ffmpegIngestCfg.MaxRestartAttempts, p.ffmpegIngestCfg.StopTimeout, requestKeyframe, p.logger)
+	sup, err := recorder.StartRecorderSupervisor(session.SDPPath(), outDir, p.ffmpegIngestCfg.SegmentSeconds, p.ffmpegIngestCfg.ReorderQueueSize, p.ffmpegIngestCfg.MaxDelayMicros, p.ffmpegIngestCfg.MaxRestartAttempts, p.ffmpegIngestCfg.StopTimeout, requestKeyframe, p.logger)
 	if err != nil {
 		p.logger.Warn("ffmpeg recorder start failed", zap.Error(err))
 		<-p.ffmpegIngestCfg.RecordSem
 		session.Close()
+		p.abortFFmpegIngestStart(st)
 		return
 	}
 
 	time.Sleep(200 * time.Millisecond)
 
+	// commit — but only if the peer hasn't closed while we were setting up.
+	// close() reads session/supervisor under this same mutex, and closes
+	// p.done unconditionally before ever touching it, so this check is
+	// race-free: whichever of close()/this commit acquires st.mu first
+	// determines whether close() sees a live session to stop, or this
+	// goroutine sees a closed peer and rolls back itself.
 	st.mu.Lock()
+	select {
+	case <-p.done:
+		st.sessionStarting = false
+		st.mu.Unlock()
+		p.logger.Warn("peer closed while ffmpeg ingest was starting, rolling back")
+		go func() {
+			// runFFmpegSegmentUploader was never started on this path — drain
+			// Segments() ourselves before/while calling Stop(), otherwise a
+			// segment ffmpeg does manage to flush during shutdown has no
+			// consumer, blocking the unbuffered segCh send forever and
+			// hanging Stop() (same hazard as the bounded-upload fix, just
+			// with zero consumers instead of a slow one).
+			drainDone := make(chan struct{})
+			go func() {
+				defer close(drainDone)
+				for path := range sup.Segments() {
+					os.Remove(path)
+				}
+			}()
+			sup.Stop()
+			<-drainDone
+			sup.Cleanup()
+			session.Close()
+			<-p.ffmpegIngestCfg.RecordSem
+		}()
+		return
+	default:
+	}
 	st.session = session
 	st.supervisor = sup
 	st.recordSlotHeld = true
@@ -301,8 +348,17 @@ func (p *Peer) noteFFmpegIngestTrack(video bool, track *webrtc.TrackRemote, rece
 	requestKeyframe()
 }
 
+// resets sessionStarting after a failed or aborted
+// ffmpeg ingest init, so the claim in noteFFmpegIngestTrack doesn't wedge
+// this peer out of recording forever (it had no way back to false before).
+func (p *Peer) abortFFmpegIngestStart(st *ffmpegIngestState) {
+	st.mu.Lock()
+	st.sessionStarting = false
+	st.mu.Unlock()
+}
 
-func (p *Peer) runFFmpegSegmentUploader(st *ffmpegIngestState, sup *ffmpegingest.RecorderSupervisor) {
+
+func (p *Peer) runFFmpegSegmentUploader(st *ffmpegIngestState, sup *recorder.RecorderSupervisor) {
 	defer close(st.uploadDone)
 	if p.storage == nil {
 		return
@@ -317,8 +373,16 @@ func (p *Peer) runFFmpegSegmentUploader(st *ffmpegIngestState, sup *ffmpegingest
 		ctx := context.Background()
 		s3Key, size, err := p.uploadFFmpegSegmentWithRetry(ctx, path, seq)
 		if err != nil {
-			p.logger.Warn("ffmpeg segment upload failed permanently", zap.Int64("seq", seq), zap.Error(err))
-			os.Remove(path)
+			p.logger.Error("ffmpeg segment upload failed permanently, recording will be marked incomplete",
+				zap.Int64("seq", seq),
+				zap.String("path", path),
+				zap.Error(err),
+			)
+			// leave the file on disk (not uploaded, not removed) — it's the
+			// only remaining copy of this segment; sup.Cleanup() is skipped
+			// for the whole attempt dir once st.incomplete is set, so it's
+			// still there for manual recovery afterward.
+			st.incomplete.Store(true)
 			seq++
 			continue
 		}
@@ -340,6 +404,22 @@ func (p *Peer) runFFmpegSegmentUploader(st *ffmpegIngestState, sup *ffmpegingest
 
 const ffmpegSegmentUploadMaxAttempts = 3
 
+// bounds how long close() waits for the uploader to
+// finish after the supervisor stops. Sized comfortably above the worst case
+// for a single segment (ffmpegSegmentUploadMaxAttempts attempts at
+// ffmpegSegmentUploadAttemptTimeout each, plus backoff between them —
+// roughly 3*15s + 2s + 4s ≈ 51s) since sup.Stop() already guarantees segCh is
+// closed by the time this wait starts, leaving at most one in-flight upload.
+const ffmpegUploadDrainTimeout = 60 * time.Second
+
+// bounds a single upload attempt. Without
+// this, a stuck connection (dead S3 endpoint, network partition) blocks the
+// uploader goroutine forever — which in turn blocks the unbuffered segCh send
+// in RecorderSupervisor.forwardSegments, which blocks RecorderSupervisor.Stop
+// forever, which blocks Peer.close forever. Bounding every attempt guarantees
+// the whole chain eventually unwinds even in the worst case.
+const ffmpegSegmentUploadAttemptTimeout = 15 * time.Second
+
 func (p *Peer) uploadFFmpegSegmentWithRetry(ctx context.Context, path string, seq int64) (string, int64, error) {
 	stat, err := os.Stat(path)
 	if err != nil {
@@ -358,12 +438,7 @@ func (p *Peer) uploadFFmpegSegmentWithRetry(ctx context.Context, path string, se
 			}
 		}
 
-		f, err := os.Open(path)
-		if err != nil {
-			return "", 0, fmt.Errorf("open segment: %w", err)
-		}
-		key, err := p.storage.UploadFFmpegSegment(ctx, p.roomID, p.streamID, seq, f)
-		f.Close()
+		key, err := p.uploadFFmpegSegmentOnce(ctx, path, seq)
 		if err == nil {
 			return key, size, nil
 		}
@@ -375,6 +450,18 @@ func (p *Peer) uploadFFmpegSegmentWithRetry(ctx context.Context, path string, se
 		)
 	}
 	return "", 0, fmt.Errorf("upload failed after %d attempts: %w", ffmpegSegmentUploadMaxAttempts, lastErr)
+}
+
+func (p *Peer) uploadFFmpegSegmentOnce(ctx context.Context, path string, seq int64) (string, error) {
+	attemptCtx, cancel := context.WithTimeout(ctx, ffmpegSegmentUploadAttemptTimeout)
+	defer cancel()
+
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open segment: %w", err)
+	}
+	defer f.Close()
+	return p.storage.UploadFFmpegSegment(attemptCtx, p.roomID, p.streamID, seq, f)
 }
 
 func (p *Peer) scheduleClose(d time.Duration) {
@@ -412,13 +499,6 @@ func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
 	fe := recorder.NewFrameExtractor(track, p.pc, p.logger)
 	if p.ffmpegIngest != nil {
 		fe.SetRawSink(p.ffmpegIngest.forwardVideo)
-	}
-
-	// tier 2: wire NALSink into recorder
-	if p.recorder != nil {
-		fe.SetNALSink(func(nals [][]byte, hasIDR bool, dur uint32) {
-			p.recorder.WriteVideoNALs(nals, hasIDR, dur)
-		})
 	}
 
 	// tier 3: fan-out RTP to AI service for realtime proctoring (if turned on).
@@ -538,15 +618,7 @@ func (p *Peer) captureAndUpload(ctx context.Context, fe *recorder.FrameExtractor
 }
 
 func (p *Peer) handleAudioTrack(track *webrtc.TrackRemote) {
-	if p.recorder != nil {
-		if err := p.recorder.StartAudio(2); err != nil {
-			p.logger.Warn("start audio recorder failed", zap.Error(err))
-		}
-	}
 	buf := make([]byte, 4096)
-	var prevTS uint32
-	var hasFirst bool
-
 	for {
 		n, _, err := track.Read(buf)
 		if err != nil {
@@ -555,23 +627,6 @@ func (p *Peer) handleAudioTrack(track *webrtc.TrackRemote) {
 		if p.ffmpegIngest != nil {
 			p.ffmpegIngest.forwardAudio(buf[:n])
 		}
-		if p.recorder == nil {
-			continue
-		}
-		var pkt rtp.Packet
-		if err := pkt.Unmarshal(buf[:n]); err != nil {
-			continue
-		}
-		sampleCount := uint32(recorder.OpusFrameSize) // 960 default (20ms at 48 kHz)
-		if hasFirst && pkt.Timestamp > prevTS {
-			diff := pkt.Timestamp - prevTS
-			if diff <= 5760 { // sanity: max 120ms
-				sampleCount = diff
-			}
-		}
-		prevTS = pkt.Timestamp
-		hasFirst = true
-		p.recorder.WriteAudioPacket(pkt.Payload, sampleCount)
 	}
 }
 
@@ -631,22 +686,43 @@ func (p *Peer) close() {
 
 		var ffmpegSegments []cache.SegmentMeta
 		ffmpegGaveUp := false
+		hadVideoTrack := false
 		if p.ffmpegIngest != nil {
 			p.ffmpegIngest.mu.Lock()
 			session := p.ffmpegIngest.session
 			sup := p.ffmpegIngest.supervisor
 			slotHeld := p.ffmpegIngest.recordSlotHeld
 			uploadDone := p.ffmpegIngest.uploadDone
+			hadVideoTrack = p.ffmpegIngest.videoTrack != nil
 			p.ffmpegIngest.mu.Unlock()
 			// stop the recorder first so ffmpeg can flush its current segment
 			// before its RTP source (session) gets cut off.
 			if sup != nil {
-				sup.Stop()
+				// StopProcess is bounded by stopTimeout alone (Recorder.shutdown's
+				// own timer + force-kill) — the ffmpeg OS process is confirmed
+				// dead by the time this returns, independent of whether the
+				// supervisor's internal segment-drain bookkeeping (Stop/doneCh)
+				// has finished. Gate the semaphore release on this alone, not on
+				// the full teardown, so a slow/stuck upload can't also hold a
+				// capacity slot hostage.
+				sup.StopProcess()
+				if sup.LastAttemptForceKilled() {
+					p.logger.Warn("ffmpeg had to be force-killed at shutdown, marking recording incomplete (last segment may be truncated)")
+					p.ffmpegIngest.incomplete.Store(true)
+				}
+				if slotHeld {
+					<-p.ffmpegIngestCfg.RecordSem
+					slotHeld = false
+				}
+
 				if uploadDone != nil {
 					select {
 					case <-uploadDone:
-					case <-time.After(20 * time.Second):
-						p.logger.Warn("ffmpeg segment upload did not finish in time, using partial results so far; cleanup deferred until upload actually finishes")
+					case <-time.After(ffmpegUploadDrainTimeout):
+						p.logger.Warn("ffmpeg segment upload did not finish in time, marking recording incomplete",
+							zap.Duration("waited", ffmpegUploadDrainTimeout),
+						)
+						p.ffmpegIngest.incomplete.Store(true)
 					}
 				}
 				p.ffmpegIngest.segMu.Lock()
@@ -654,10 +730,16 @@ func (p *Peer) close() {
 				p.ffmpegIngest.segMu.Unlock()
 				ffmpegGaveUp = sup.GaveUp()
 
-
 				go func() {
+					sup.Stop() // idempotent — StopProcess already ran; this just waits for doneCh (segCh drain) now
 					if uploadDone != nil {
 						<-uploadDone
+					}
+					if p.ffmpegIngest.incomplete.Load() {
+						p.logger.Warn("ffmpeg ingest had a failed/incomplete segment, skipping temp dir cleanup for manual recovery",
+							zap.String("outDir", sup.BaseOutDir()),
+						)
+						return
 					}
 					sup.Cleanup()
 				}()
@@ -671,56 +753,52 @@ func (p *Peer) close() {
 		}
 
 		segmentKeys := []string{}
-		useFFmpeg := !p.closedByFailure.Load() && len(ffmpegSegments) > 0 && !ffmpegGaveUp
-		if useFFmpeg {
-			for _, s := range ffmpegSegments {
-				segmentKeys = append(segmentKeys, s.S3Key)
-				if p.segments != nil {
-					if err := p.segments.Add(ctx, p.streamID, s); err != nil {
-						p.logger.Warn("register ffmpeg segment failed", zap.Int64("seq", s.Seq), zap.Error(err))
-					}
-				}
-			}
+		for _, s := range ffmpegSegments {
+			segmentKeys = append(segmentKeys, s.S3Key)
 			if p.segments != nil {
-				if err := p.segments.MarkComplete(ctx, p.streamID); err != nil {
-					p.logger.Warn("mark recording complete failed", zap.Error(err))
+				if err := p.segments.Add(ctx, p.streamID, s); err != nil {
+					p.logger.Error("register ffmpeg segment failed, recording will be marked incomplete",
+						zap.Int64("seq", s.Seq), zap.Error(err),
+					)
+					p.ffmpegIngest.incomplete.Store(true)
 				}
 			}
-			if p.recorder != nil {
-				p.recorder.Close() // ffmpeg won for this stream, discard SegmentedRecorder's output
+		}
+		incomplete := p.ffmpegIngest != nil && p.ffmpegIngest.incomplete.Load()
+		// a video track arrived — this stream had something worth recording —
+		// but zero segments resulted, whether because ffmpeg ingest never got
+		// far enough to even start (port allocator, StartSession, semaphore,
+		// or StartRecorderSupervisor failures; see noteFFmpegIngestTrack) or
+		// because the supervisor ran and exited cleanly (GaveUp() == false)
+		// without ever producing output. Either way this must not read as
+		// "nothing to record" without being flagged.
+		emptyRecording := hadVideoTrack && len(ffmpegSegments) == 0 && !p.closedByFailure.Load()
+		if !p.closedByFailure.Load() && !ffmpegGaveUp && !incomplete && len(ffmpegSegments) > 0 && p.segments != nil {
+			if err := p.segments.MarkComplete(ctx, p.streamID); err != nil {
+				p.logger.Warn("mark recording complete failed", zap.Error(err))
 			}
-			p.logger.Info("recording finalized from ffmpeg pipeline", zap.Int("segments", len(ffmpegSegments)))
-		} else if p.recorder != nil {
-			if p.closedByFailure.Load() {
-				p.recorder.Close() // stream failed, no upload
-			} else {
-				segments, err := p.recorder.Finalize(ctx)
-				if err != nil {
-					p.logger.Warn("recording finalize failed", zap.Error(err))
-				} else {
-					for _, s := range segments {
-						segmentKeys = append(segmentKeys, s.S3Key)
-						if p.segments != nil {
-							if err := p.segments.Add(ctx, p.streamID, cache.SegmentMeta{
-								Seq: s.Seq,
-								S3Key: s.S3Key,
-								StartedAt: s.StartedAt,
-								EndedAt: s.EndedAt,
-								UploadedAt: time.Now().UTC(),
-							}); err != nil {
-								p.logger.Warn("register server segment failed",
-									zap.Int64("seq", s.Seq),
-									zap.Error(err),
-								)
-							}
-						}
-					}
-					if p.segments != nil && len(segments) > 0 {
-						if err := p.segments.MarkComplete(ctx, p.streamID); err != nil {
-							p.logger.Warn("mark server recording complete failed", zap.Error(err))
-						}
-					}
-				}
+		}
+		p.logger.Info("recording finalized from ffmpeg pipeline", zap.Int("segments", len(ffmpegSegments)))
+		if (ffmpegGaveUp || incomplete || emptyRecording) && !p.closedByFailure.Load() {
+			p.logger.Warn("ffmpeg recording incomplete",
+				zap.Bool("supervisorGaveUp", ffmpegGaveUp),
+				zap.Bool("uploadOrRegistryFailure", incomplete),
+				zap.Bool("emptyRecording", emptyRecording),
+				zap.Int("segmentsCaptured", len(ffmpegSegments)),
+			)
+			if err := p.monitorUseCase.PublishAlert(
+				ctx, domain.AlertEvent{
+					Source: domain.AlertSourceStreaming,
+					RoomID: p.roomID,
+					ParticipantID: p.participantID,
+					StreamID: p.streamID,
+					StreamType: p.streamType,
+					AlertType: domain.AlertRecordingIncomplete,
+					Confidence: 1.0,
+					CapturedAt: time.Now().UTC(),
+				}, "",
+			); err != nil {
+				p.logger.Warn("recording incomplete alert failed", zap.Error(err))
 			}
 		}
 		if p.closedByFailure.Load() {

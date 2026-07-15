@@ -1,4 +1,4 @@
-package ffmpegingest
+package recorder
 
 import (
 	"context"
@@ -9,12 +9,19 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/pion/webrtc/v4"
 	"go.uber.org/zap"
 )
 
+// controls how often forwarding throughput is logged —
+// gives a direct answer, next to any hang/exit log, to "did our side stop
+// sending, or is ffmpeg receiving fine and stuck internally?" instead of
+// having to infer it from ffmpeg's own stderr.
+const forwardStatsInterval = 30 * time.Second
 
 type Session struct {
 	ports   allocatedPorts
@@ -26,6 +33,17 @@ type Session struct {
 	videoConn *net.UDPConn
 	audioConn *net.UDPConn
 	logger    *zap.Logger
+
+	// count forward attempts (incremented before
+	// the UDP write), not confirmed deliveries — UDP has no delivery ack, so
+	// "attempted" is the honest ceiling. videoWriteErrors/audioWriteErrors
+	// track how many of those attempts actually failed at the local socket
+	// write, so the periodic stats log can tell healthy-but-attempted-only
+	// apart from actually-failing-to-send.
+	videoPackets     atomic.Uint64
+	audioPackets     atomic.Uint64
+	videoWriteErrors atomic.Uint64
+	audioWriteErrors atomic.Uint64
 }
 
 
@@ -78,7 +96,7 @@ func StartSession(
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		logForward(logger, "video RTCP", forwardRTCP(sessionCtx, videoReceiver, ports.videoRTCP))
@@ -86,6 +104,10 @@ func StartSession(
 	go func() {
 		defer wg.Done()
 		logForward(logger, "audio RTCP", forwardRTCP(sessionCtx, audioReceiver, ports.audioRTCP))
+	}()
+	go func() {
+		defer wg.Done()
+		s.logForwardStats(sessionCtx)
 	}()
 	go func() {
 		wg.Wait()
@@ -98,14 +120,48 @@ func StartSession(
 
 
 func (s *Session) ForwardVideoRTP(raw []byte) {
+	s.videoPackets.Add(1)
 	if _, err := s.videoConn.Write(raw); err != nil {
+		s.videoWriteErrors.Add(1)
 		s.logger.Debug("ffmpeg ingest video RTP forward failed", zap.Error(err))
 	}
 }
 
 func (s *Session) ForwardAudioRTP(raw []byte) {
+	s.audioPackets.Add(1)
 	if _, err := s.audioConn.Write(raw); err != nil {
+		s.audioWriteErrors.Add(1)
 		s.logger.Debug("ffmpeg ingest audio RTP forward failed", zap.Error(err))
+	}
+}
+
+
+func (s *Session) logForwardStats(ctx context.Context) {
+	ticker := time.NewTicker(forwardStatsInterval)
+	defer ticker.Stop()
+	var lastVideo, lastAudio, lastVideoErr, lastAudioErr uint64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			video := s.videoPackets.Load()
+			audio := s.audioPackets.Load()
+			videoErr := s.videoWriteErrors.Load()
+			audioErr := s.audioWriteErrors.Load()
+			s.logger.Info("ffmpeg ingest forwarding stats",
+				zap.Uint64("videoPacketsAttemptedTotal", video),
+				zap.Uint64("audioPacketsAttemptedTotal", audio),
+				zap.Uint64("videoPacketsAttemptedSinceLast", video-lastVideo),
+				zap.Uint64("audioPacketsAttemptedSinceLast", audio-lastAudio),
+				zap.Uint64("videoWriteErrorsTotal", videoErr),
+				zap.Uint64("audioWriteErrorsTotal", audioErr),
+				zap.Uint64("videoWriteErrorsSinceLast", videoErr-lastVideoErr),
+				zap.Uint64("audioWriteErrorsSinceLast", audioErr-lastAudioErr),
+			)
+			lastVideo, lastAudio = video, audio
+			lastVideoErr, lastAudioErr = videoErr, audioErr
+		}
 	}
 }
 

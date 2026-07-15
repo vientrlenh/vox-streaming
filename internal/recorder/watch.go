@@ -1,4 +1,4 @@
-package ffmpegingest
+package recorder
 
 import (
 	"bufio"

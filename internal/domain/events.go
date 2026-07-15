@@ -82,7 +82,7 @@ func DefaultAlertLevel(alertType string) AlertLevel {
 	switch alertType {
 	case AlertPhoneDetected, AlertMultiplePersons, AlertProhibitedObject: 
 		return AlertLevelCritical
-	case AlertFaceNotVisible, AlertSuspiciousGaze, AlertStreamDropped, AlertTrackEnded, AlertReconnectLoop: 
+	case AlertFaceNotVisible, AlertSuspiciousGaze, AlertStreamDropped, AlertTrackEnded, AlertReconnectLoop, AlertRecordingIncomplete:
 		return AlertLevelWarning
 	default: 
 		return AlertLevelInfo
@@ -112,9 +112,10 @@ const (
 	AlertProhibitedObject = "PROHIBITED_OBJECT"
 
 	// Streaming service detect alerts
-	AlertStreamDropped = "STREAM_DROPPED"
-	AlertTrackEnded    = "TRACK_ENDED"
-	AlertReconnectLoop = "RECONNECT_LOOP"
+	AlertStreamDropped       = "STREAM_DROPPED"
+	AlertTrackEnded          = "TRACK_ENDED"
+	AlertReconnectLoop       = "RECONNECT_LOOP"
+	AlertRecordingIncomplete = "RECORDING_INCOMPLETE"
 )
 
 type AlertRaisedEvent struct {

@@ -31,7 +31,7 @@ type fuaBuf struct {
 	data []byte
 }
 
-// reorderBuffer resequences RTP packets so downstream NAL processing always
+// resequences RTP packets so downstream NAL processing always
 // sees a monotonically increasing sequence number, absorbing the reordering
 // that NACK-triggered retransmission naturally introduces (a repaired packet
 // arrives later than packets that kept flowing while it was in flight).
@@ -49,7 +49,7 @@ const (
 	reorderMaxHold = 64                     // bound memory under pathological loss bursts
 )
 
-// push returns pkt (and any now-contiguous packets it unblocked) in sequence
+// returns pkt (and any now-contiguous packets it unblocked) in sequence
 // order. Returns nil if pkt is buffered pending an earlier gap, or discarded
 // as a duplicate / already-past packet.
 func (rb *reorderBuffer) push(pkt *rtp.Packet) []*rtp.Packet {
@@ -91,8 +91,7 @@ func (rb *reorderBuffer) push(pkt *rtp.Packet) []*rtp.Packet {
 	return out
 }
 
-// giveUpAndDrain abandons the current gap (nextSeq is presumed permanently
-// lost), advances past it, and drains any now-contiguous run from pending.
+
 func (rb *reorderBuffer) giveUpAndDrain() []*rtp.Packet {
 	rb.nextSeq++
 	var out []*rtp.Packet
@@ -110,12 +109,6 @@ func (rb *reorderBuffer) giveUpAndDrain() []*rtp.Packet {
 	}
 	return out
 }
-
-// receive all NAL units each completed picture
-// hasIDR = true if picture contains IDR frame
-// dur is the picture duration in 90kHz ticks derived from RTP timestamps
-type NALSink func(nals [][]byte, hasIDR bool, dur uint32)
-
 
 // receive each parsed RTP packet to fan-out (relay to AI service)
 // Notes: don't keep the reference of packet when the method return -> payload stay in buffer re-use from ReadLoop. If want to use it, copy/marshal
@@ -142,18 +135,15 @@ type FrameExtractor struct {
 	fua *fuaBuf // FU-A reassembly
 	picBuf  [][]byte // NALs accumulating for the current RTP picture
 	picTS   uint32   // RTP timestamp of the picture being assembled
-	prevTS  uint32   // RTP timestamp of the previous committed picture
-	hasFirstPic bool 
 
-	prevSeq uint16 
-	hasPrevSeq bool 
+	prevSeq uint16
+	hasPrevSeq bool
 	lostPackets uint64 // number of lost packets
 
 	pictureCorrupted bool
 	lastRecoveryPLI time.Time
 	reorder reorderBuffer
 
-	sink NALSink // optional, called for every complete picture
 	rtpSink RTPSink // optional, called for every RTP packet (fan-out relay)
 	rawSink RawSink // optional, called with every raw RTP packet (ffmpeg ingest fan-out)
 }
@@ -172,12 +162,6 @@ func (fe *FrameExtractor) IDRReady() <-chan struct{} {
 	return fe.idrCh
 }
 
-// register sink to receive every picture for tier 2 recording
-func (fe *FrameExtractor) SetNALSink(sink NALSink) {
-	fe.sink = sink
-}
-
-
 // register sink to receive every RTP packet (use for relaying fan-out to AI)
 func (fe *FrameExtractor) SetRTPSink(sink RTPSink) {
 	fe.rtpSink = sink
@@ -190,8 +174,13 @@ func (fe *FrameExtractor) SetRawSink(sink RawSink) {
 
 func (fe *FrameExtractor) RequestKeyFrame() {
 	fe.mu.Lock()
-	if time.Since(fe.lastRecoveryPLI) < minPLIInterval { 
+	sinceLast := time.Since(fe.lastRecoveryPLI)
+	if sinceLast < minPLIInterval {
 		fe.mu.Unlock()
+		fe.logger.Debug("PLI request throttled",
+			zap.Duration("sinceLastPLI", sinceLast),
+			zap.Duration("minPLIInterval", minPLIInterval),
+		)
 		return
 	}
 	fe.lastRecoveryPLI = time.Now()
@@ -203,7 +192,9 @@ func (fe *FrameExtractor) RequestKeyFrame() {
 		},
 	}); err != nil {
 		fe.logger.Warn("PLI send failed", zap.Error(err))
+		return
 	}
+	fe.logger.Debug("PLI sent", zap.Duration("sinceLastPLI", sinceLast))
 }
 
 func (fe *FrameExtractor) ReadLoop(ctx context.Context) {
@@ -218,13 +209,13 @@ func (fe *FrameExtractor) ReadLoop(ctx context.Context) {
 		if err != nil {
 			return
 		}
+
+		if fe.rawSink != nil {
+			fe.rawSink(buf[:n])
+		}
 		var pkt rtp.Packet
 		if err := pkt.Unmarshal(buf[:n]); err != nil {
 			continue
-		}
-
-		if fe.rawSink != nil && len(pkt.Payload) > 0 {
-			fe.rawSink(buf[:n]) // fan-out to ffmpeg ingest
 		}
 		if fe.rtpSink != nil {
 			fe.rtpSink(&pkt) // fan-out relay: sink copy since the buf will be re-used
@@ -367,17 +358,6 @@ func (fe *FrameExtractor) commitPicture() {
 		return
 	}
 
-	// derive duration from consecutive RTP timestamps (90kHz clock)
-	// fallback to defaultFrameDur (30fps) when no prior timestamp or value looks wrong
-	dur := defaultFrameDur
-	if fe.hasFirstPic {
-		if d := fe.picTS - fe.prevTS; d > 0 && d < 900000 { // sanity: < 10s at 90kHz
-			dur = d
-		}
-	}
-	fe.prevTS = fe.picTS
-	fe.hasFirstPic = true
-
 	if fe.pictureCorrupted {
 		fe.pictureCorrupted = false
 		fe.picBuf = nil 
@@ -394,11 +374,6 @@ func (fe *FrameExtractor) commitPicture() {
 			hasIDR = true
 			break
 		}
-	}
-
-	// tier 2: send all NAL units to recorder (IDR and non-IDR)
-	if fe.sink != nil {
-		fe.sink(fe.picBuf, hasIDR, dur)
 	}
 
 	// tier 1: only buffer IDR for keyframe capture

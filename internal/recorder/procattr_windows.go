@@ -1,6 +1,6 @@
 //go:build windows
 
-package ffmpegingest
+package recorder
 
 import "os/exec"
 

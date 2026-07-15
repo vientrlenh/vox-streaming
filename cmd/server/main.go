@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,7 +20,7 @@ import (
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/queue"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
-	"github.com/vientrlenh/vox-streaming/internal/recorder/ffmpegingest"
+	"github.com/vientrlenh/vox-streaming/internal/recorder"
 	grpcclient "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
 	grpctransport "github.com/vientrlenh/vox-streaming/internal/transport/grpc/server"
 	httpRoute "github.com/vientrlenh/vox-streaming/internal/transport/http"
@@ -173,12 +174,24 @@ func main() {
 
 	ffmpegIngestOpts := buildFFmpegIngestOptions(logger)
 
+	tempDir := os.Getenv("SEGMENT_TEMP_DIR")
+	sweepTTLHours, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_TEMP_TTL_HOURS"))
+	if sweepTTLHours == 0 {
+		sweepTTLHours = 24
+	}
+	recorder.StartTempDirSweep(
+		context.Background(),
+		filepath.Join(tempDir, "ffmpeg-ingest"),
+		time.Duration(sweepTTLHours)*time.Hour,
+		logger,
+	)
+
 	webrtcHandler := webrtctransport.NewHandler(
 		webrtctransport.PeerConfig{
 			API:           webrtcAPI,
 			ICEServers:    iceServers,
 			FrameInterval: time.Duration(frameIntervalSecs) * time.Second,
-			TempDir:       os.Getenv("SEGMENT_TEMP_DIR"),
+			TempDir:       tempDir,
 			AIRelay: webrtctransport.AIRelayOptions{
 				Enabled:   os.Getenv("AI_RELAY_ENABLED") == "true",
 				URL:       os.Getenv("AI_WEBRTC_URL"),
@@ -429,8 +442,6 @@ func handleStreamEnded(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.Han
 
 		mu.NotifyLeft(ctx, event.RoomID, event.ParticipantID, event.StreamID, event.StreamType)
 
-		// notify qua Spring Boot bằng GRPC để cập nhật dữ liệu trạng thái vào DB
-		// ...
 		return nil
 	}
 }
@@ -478,9 +489,6 @@ func parseAllowedOrigins() []string {
 
 
 func buildFFmpegIngestOptions(logger *zap.Logger) webrtctransport.FFmpegIngestOptions {
-	if os.Getenv("FFMPEG_INGEST_ENABLED") != "true" {
-		return webrtctransport.FFmpegIngestOptions{}
-	}
 	rangeStart, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_PORT_RANGE_START"))
 	if rangeStart == 0 {
 		rangeStart = 40000
@@ -489,15 +497,14 @@ func buildFFmpegIngestOptions(logger *zap.Logger) webrtctransport.FFmpegIngestOp
 	if rangeEnd == 0 {
 		rangeEnd = 41999
 	}
-	alloc, err := ffmpegingest.NewPortAllocator(rangeStart, rangeEnd)
+	alloc, err := recorder.NewPortAllocator(rangeStart, rangeEnd)
 	if err != nil {
-		logger.Warn("ffmpeg ingest bridge disabled: port allocator init failed", zap.Error(err))
-		return webrtctransport.FFmpegIngestOptions{}
+		logger.Fatal("ffmpeg ingest port allocator init failed", zap.Error(err))
 	}
 
 	segmentSeconds, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_SEGMENT_SECONDS"))
 	if segmentSeconds == 0 {
-		segmentSeconds = 30 // matches SegmentedRecorder's defaultSegmentDuration
+		segmentSeconds = 30
 	}
 	maxConcurrent, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_MAX_CONCURRENT"))
 	if maxConcurrent == 0 {
@@ -513,19 +520,26 @@ func buildFFmpegIngestOptions(logger *zap.Logger) webrtctransport.FFmpegIngestOp
 		stopTimeoutSecs = 5
 	}
 
-	logger.Info("ffmpeg ingest bridge enabled (cutover, RECORDING.md §11)",
+	reorderQueueSize, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_REORDER_QUEUE_SIZE"))
+
+	maxDelayMs, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_MAX_DELAY_MS"))
+
+	logger.Info("ffmpeg ingest bridge enabled",
 		zap.Int("portRangeStart", rangeStart),
 		zap.Int("portRangeEnd", rangeEnd),
 		zap.Int("segmentSeconds", segmentSeconds),
 		zap.Int("maxConcurrentRecorders", maxConcurrent),
 		zap.Int("maxRestartAttempts", maxRestartAttempts),
 		zap.Int("stopTimeoutSecs", stopTimeoutSecs),
+		zap.Int("reorderQueueSize", reorderQueueSize),
+		zap.Int("maxDelayMs", maxDelayMs),
 	)
 	return webrtctransport.FFmpegIngestOptions{
-		Enabled:            true,
 		Allocator:          alloc,
 		RecordSem:          make(chan struct{}, maxConcurrent),
 		SegmentSeconds:     segmentSeconds,
+		ReorderQueueSize:   reorderQueueSize,
+		MaxDelayMicros:     maxDelayMs * 1000,
 		MaxRestartAttempts: maxRestartAttempts,
 		StopTimeout:        time.Duration(stopTimeoutSecs) * time.Second,
 	}
