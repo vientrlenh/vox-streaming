@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
@@ -43,7 +44,8 @@ type FFmpegIngestOptions struct {
 	Allocator          *ffmpegingest.PortAllocator
 	RecordSem          chan struct{} // capacity = max concurrent ffmpeg recorders across all peers
 	SegmentSeconds     int
-	MaxRestartAttempts int 
+	MaxRestartAttempts int
+	StopTimeout        time.Duration // grace period for ffmpeg to quit gracefully at stream end before being force-killed
 }
 
 // coordinates waiting for both the video and audio track
@@ -56,6 +58,7 @@ type ffmpegIngestState struct {
 	audioTrack    *webrtc.TrackRemote
 	audioReceiver *webrtc.RTPReceiver
 	session       *ffmpegingest.Session
+	sessionStarting bool // claimed under mu while StartSession/StartRecorderSupervisor run, before session is set — closes the race where video's and audio's OnTrack goroutines both see session == nil
 	supervisor    *ffmpegingest.RecorderSupervisor
 	recordSlotHeld bool // true once a RecordSem slot was acquired for this stream
 
@@ -244,7 +247,11 @@ func (p *Peer) noteFFmpegIngestTrack(video bool, track *webrtc.TrackRemote, rece
 		st.audioTrack, st.audioReceiver = track, receiver
 	}
 	vt, vr, at, ar := st.videoTrack, st.videoReceiver, st.audioTrack, st.audioReceiver
-	ready := vt != nil && at != nil && st.session == nil
+
+	ready := vt != nil && at != nil && st.session == nil && !st.sessionStarting
+	if ready {
+		st.sessionStarting = true
+	}
 	st.mu.Unlock()
 	if !ready {
 		return
@@ -255,28 +262,43 @@ func (p *Peer) noteFFmpegIngestTrack(video bool, track *webrtc.TrackRemote, rece
 		p.logger.Warn("ffmpeg ingest bridge start failed", zap.Error(err))
 		return
 	}
-	st.mu.Lock()
-	st.session = session
-	st.mu.Unlock()
 
 	select {
 	case p.ffmpegIngestCfg.RecordSem <- struct{}{}:
-		outDir := filepath.Join(p.tempDir, "ffmpeg-ingest", p.streamID)
-		sup, err := ffmpegingest.StartRecorderSupervisor(session.SDPPath(), outDir, p.ffmpegIngestCfg.SegmentSeconds, p.ffmpegIngestCfg.MaxRestartAttempts, p.logger)
-		if err != nil {
-			p.logger.Warn("ffmpeg recorder start failed", zap.Error(err))
-			<-p.ffmpegIngestCfg.RecordSem
-			return
-		}
-		st.mu.Lock()
-		st.supervisor = sup
-		st.recordSlotHeld = true
-		st.uploadDone = make(chan struct{})
-		st.mu.Unlock()
-		go p.runFFmpegSegmentUploader(st, sup)
 	default:
 		p.logger.Warn("ffmpeg ingest max concurrent recorders reached, skipping ffmpeg recording for this stream")
+		session.Close()
+		return
 	}
+
+	requestKeyframe := func() {
+		if err := p.pc.WriteRTCP([]rtcp.Packet{
+			&rtcp.PictureLossIndication{MediaSSRC: uint32(vt.SSRC())},
+		}); err != nil {
+			p.logger.Warn("ffmpeg ingest keyframe request failed", zap.Error(err))
+		}
+	}
+
+	outDir := filepath.Join(p.tempDir, "ffmpeg-ingest", p.streamID)
+	sup, err := ffmpegingest.StartRecorderSupervisor(session.SDPPath(), outDir, p.ffmpegIngestCfg.SegmentSeconds, p.ffmpegIngestCfg.MaxRestartAttempts, p.ffmpegIngestCfg.StopTimeout, requestKeyframe, p.logger)
+	if err != nil {
+		p.logger.Warn("ffmpeg recorder start failed", zap.Error(err))
+		<-p.ffmpegIngestCfg.RecordSem
+		session.Close()
+		return
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	st.mu.Lock()
+	st.session = session
+	st.supervisor = sup
+	st.recordSlotHeld = true
+	st.uploadDone = make(chan struct{})
+	st.mu.Unlock()
+	go p.runFFmpegSegmentUploader(st, sup)
+
+	requestKeyframe()
 }
 
 
@@ -607,8 +629,6 @@ func (p *Peer) close() {
 		duration := int64(time.Since(p.startedAt).Seconds())
 		ctx := context.Background()
 
-		// ffmpegSegments/ffmpegGaveUp decide, below, whether ffmpeg's output
-		// replaces SegmentedRecorder's for this stream (cutover plan Part C).
 		var ffmpegSegments []cache.SegmentMeta
 		ffmpegGaveUp := false
 		if p.ffmpegIngest != nil {
@@ -621,19 +641,26 @@ func (p *Peer) close() {
 			// stop the recorder first so ffmpeg can flush its current segment
 			// before its RTP source (session) gets cut off.
 			if sup != nil {
-				sup.Stop(5 * time.Second)
+				sup.Stop()
 				if uploadDone != nil {
 					select {
 					case <-uploadDone:
 					case <-time.After(20 * time.Second):
-						p.logger.Warn("ffmpeg segment upload did not finish in time, using partial results")
+						p.logger.Warn("ffmpeg segment upload did not finish in time, using partial results so far; cleanup deferred until upload actually finishes")
 					}
 				}
 				p.ffmpegIngest.segMu.Lock()
 				ffmpegSegments = append([]cache.SegmentMeta(nil), p.ffmpegIngest.segs...)
 				p.ffmpegIngest.segMu.Unlock()
 				ffmpegGaveUp = sup.GaveUp()
-				sup.Cleanup()
+
+
+				go func() {
+					if uploadDone != nil {
+						<-uploadDone
+					}
+					sup.Cleanup()
+				}()
 			}
 			if slotHeld {
 				<-p.ffmpegIngestCfg.RecordSem

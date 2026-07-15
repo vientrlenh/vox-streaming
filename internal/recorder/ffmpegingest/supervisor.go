@@ -17,11 +17,13 @@ const defaultAttemptStopTimeout = 5 * time.Second
 
 
 type RecorderSupervisor struct {
-	sdpPath        string
-	baseOutDir     string
-	segmentSeconds int
-	maxAttempts    int
-	logger         *zap.Logger
+	sdpPath         string
+	baseOutDir      string
+	segmentSeconds  int
+	maxAttempts     int
+	stopTimeout     time.Duration // grace period for a soft "q" quit before force-killing; see StartRecorderSupervisor
+	requestKeyframe func()        // see StartRecorderSupervisor
+	logger          *zap.Logger
 
 	segCh  chan string
 	stopCh chan struct{}
@@ -33,9 +35,12 @@ type RecorderSupervisor struct {
 	once sync.Once
 }
 
-func StartRecorderSupervisor(sdpPath, baseOutDir string, segmentSeconds, maxAttempts int, logger *zap.Logger) (*RecorderSupervisor, error) {
+func StartRecorderSupervisor(sdpPath, baseOutDir string, segmentSeconds, maxAttempts int, stopTimeout time.Duration, requestKeyframe func(), logger *zap.Logger) (*RecorderSupervisor, error) {
 	if maxAttempts < 1 {
 		maxAttempts = 1
+	}
+	if stopTimeout <= 0 {
+		stopTimeout = defaultAttemptStopTimeout
 	}
 	rec, err := StartRecorder(sdpPath, filepath.Join(baseOutDir, "attempt-1"), segmentSeconds, logger)
 	if err != nil {
@@ -43,18 +48,29 @@ func StartRecorderSupervisor(sdpPath, baseOutDir string, segmentSeconds, maxAtte
 	}
 
 	s := &RecorderSupervisor{
-		sdpPath:        sdpPath,
-		baseOutDir:     baseOutDir,
-		segmentSeconds: segmentSeconds,
-		maxAttempts:    maxAttempts,
-		logger:         logger,
-		segCh:          make(chan string),
-		stopCh:         make(chan struct{}),
-		doneCh:         make(chan struct{}),
-		cur:            rec,
+		sdpPath:         sdpPath,
+		baseOutDir:      baseOutDir,
+		segmentSeconds:  segmentSeconds,
+		maxAttempts:     maxAttempts,
+		stopTimeout:     stopTimeout,
+		requestKeyframe: requestKeyframe,
+		logger:          logger,
+		segCh:           make(chan string),
+		stopCh:          make(chan struct{}),
+		doneCh:          make(chan struct{}),
+		cur:             rec,
 	}
 	go s.run(rec, 1)
 	return s, nil
+}
+
+
+func (s *RecorderSupervisor) primeKeyframe() {
+	if s.requestKeyframe == nil {
+		return
+	}
+	time.Sleep(200 * time.Millisecond)
+	s.requestKeyframe()
 }
 
 func (s *RecorderSupervisor) run(rec *Recorder, attempt int) {
@@ -68,7 +84,7 @@ func (s *RecorderSupervisor) run(rec *Recorder, attempt int) {
 
 		select {
 		case <-s.stopCh:
-			rec.Stop(defaultAttemptStopTimeout)
+			rec.Stop(s.stopTimeout)
 		default:
 		}
 
@@ -108,6 +124,7 @@ func (s *RecorderSupervisor) run(rec *Recorder, attempt int) {
 			return
 		}
 		s.logger.Info("ffmpeg recorder restarted after unexpected exit", zap.Int("attempt", attempt))
+		s.primeKeyframe()
 		rec = next
 	}
 }
@@ -130,32 +147,25 @@ func (s *RecorderSupervisor) forwardSegments(rec *Recorder) {
 	<-drained
 }
 
-// Segments returns completed segment paths across every attempt, in order.
-// Closes once the supervisor has stopped for good (deliberately or after
-// exhausting maxAttempts) — callers should range over it unconditionally.
+
 func (s *RecorderSupervisor) Segments() <-chan string {
 	return s.segCh
 }
 
-// GaveUp reports whether the supervisor stopped because it exhausted
-// maxAttempts (or a restart itself failed to start), as opposed to a
-// deliberate Stop() — the two must be told apart at the call site (peer.go's
-// close()) since only a permanent give-up should fall back away from ffmpeg.
+
 func (s *RecorderSupervisor) GaveUp() bool {
 	return s.gaveUp.Load()
 }
 
-// Stop asks the current attempt to quit gracefully and waits for run() to
-// fully finish, guaranteeing Segments() is already closed by the time Stop
-// returns.
-func (s *RecorderSupervisor) Stop(timeout time.Duration) {
+
+func (s *RecorderSupervisor) Stop() {
 	s.once.Do(func() {
 		close(s.stopCh)
 		s.mu.Lock()
 		cur := s.cur
 		s.mu.Unlock()
 		if cur != nil {
-			cur.Stop(timeout)
+			cur.Stop(s.stopTimeout)
 		}
 	})
 	<-s.doneCh

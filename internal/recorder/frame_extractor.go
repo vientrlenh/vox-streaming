@@ -183,10 +183,7 @@ func (fe *FrameExtractor) SetRTPSink(sink RTPSink) {
 	fe.rtpSink = sink
 }
 
-// register sink to receive every raw RTP packet (use for ffmpeg ingest
-// fan-out — see peer.go's ffmpegIngestState). FrameExtractor is the sole
-// reader of the underlying track; this lets a second consumer piggyback on
-// that single read instead of racing it with its own track.Read/ReadRTP call.
+
 func (fe *FrameExtractor) SetRawSink(sink RawSink) {
 	fe.rawSink = sink
 }
@@ -221,12 +218,13 @@ func (fe *FrameExtractor) ReadLoop(ctx context.Context) {
 		if err != nil {
 			return
 		}
-		if fe.rawSink != nil {
-			fe.rawSink(buf[:n]) // fan-out to ffmpeg ingest before unmarshal
-		}
 		var pkt rtp.Packet
 		if err := pkt.Unmarshal(buf[:n]); err != nil {
 			continue
+		}
+
+		if fe.rawSink != nil && len(pkt.Payload) > 0 {
+			fe.rawSink(buf[:n]) // fan-out to ffmpeg ingest
 		}
 		if fe.rtpSink != nil {
 			fe.rtpSink(&pkt) // fan-out relay: sink copy since the buf will be re-used
@@ -269,10 +267,7 @@ func (fe *FrameExtractor) checkSeqGap(pkt *rtp.Packet) bool {
 	}
 }
 
-// ingest is the ReadLoop entry point. The reorder buffer can retain pkt
-// across multiple ReadLoop iterations while waiting for an earlier gap to
-// fill (NACK retransmit), but pkt.Payload aliases ReadLoop's reused read
-// buffer — clone it before it can be retained past this call.
+
 func (fe *FrameExtractor) ingest(pkt *rtp.Packet) {
 	cloned := *pkt
 	cloned.Payload = append([]byte(nil), pkt.Payload...)

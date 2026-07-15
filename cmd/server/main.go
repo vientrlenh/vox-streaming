@@ -508,12 +508,18 @@ func buildFFmpegIngestOptions(logger *zap.Logger) webrtctransport.FFmpegIngestOp
 		maxRestartAttempts = 3
 	}
 
+	stopTimeoutSecs, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_STOP_TIMEOUT_SECS"))
+	if stopTimeoutSecs == 0 {
+		stopTimeoutSecs = 5
+	}
+
 	logger.Info("ffmpeg ingest bridge enabled (cutover, RECORDING.md §11)",
 		zap.Int("portRangeStart", rangeStart),
 		zap.Int("portRangeEnd", rangeEnd),
 		zap.Int("segmentSeconds", segmentSeconds),
 		zap.Int("maxConcurrentRecorders", maxConcurrent),
 		zap.Int("maxRestartAttempts", maxRestartAttempts),
+		zap.Int("stopTimeoutSecs", stopTimeoutSecs),
 	)
 	return webrtctransport.FFmpegIngestOptions{
 		Enabled:            true,
@@ -521,6 +527,7 @@ func buildFFmpegIngestOptions(logger *zap.Logger) webrtctransport.FFmpegIngestOp
 		RecordSem:          make(chan struct{}, maxConcurrent),
 		SegmentSeconds:     segmentSeconds,
 		MaxRestartAttempts: maxRestartAttempts,
+		StopTimeout:        time.Duration(stopTimeoutSecs) * time.Second,
 	}
 }
 

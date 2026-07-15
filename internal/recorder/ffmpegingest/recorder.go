@@ -135,19 +135,29 @@ func (r *Recorder) shutdown(timeout time.Duration) {
 	default:
 	}
 
+	quitSentAt := time.Now()
 	_, _ = io.WriteString(r.stdin, "q\n")
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-r.done:
-	case <-timer.C:
-		r.logger.Warn("ffmpeg recorder did not exit gracefully, killing process group",
+		r.logger.Info("ffmpeg recorder exited gracefully",
 			zap.String("outDir", r.outDir),
+			zap.Duration("tookAfterQuit", time.Since(quitSentAt)),
+		)
+	case <-timer.C:
+		r.logger.Warn("ffmpeg recorder did not exit gracefully within timeout, killing process group",
+			zap.String("outDir", r.outDir),
+			zap.Duration("timeout", timeout),
 		)
 		if err := killProcessGroup(r.cmd); err != nil {
 			r.logger.Warn("kill ffmpeg recorder process group failed", zap.Error(err))
 		}
 		<-r.done
+		r.logger.Info("ffmpeg recorder exited after force-kill",
+			zap.String("outDir", r.outDir),
+			zap.Duration("tookAfterQuit", time.Since(quitSentAt)),
+		)
 	}
 }
 
