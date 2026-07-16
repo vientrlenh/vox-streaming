@@ -15,6 +15,7 @@ import (
 
 	"github.com/joho/godotenv"
 	pwebrtc "github.com/pion/webrtc/v4"
+	"github.com/rs/cors"
 	"github.com/segmentio/kafka-go"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
@@ -215,7 +216,15 @@ func main() {
 		addr = ":8080"
 	}
 	mux := http.NewServeMux()
-	srv := &http.Server{Addr: addr, Handler: mux}
+	c := cors.New(cors.Options{
+		AllowedOrigins: allowedOrigins, 
+		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"}, 
+		AllowedHeaders: []string{"Content-Type", "Authorization"}, 
+		AllowCredentials: true,
+	})
+	corsHandler := c.Handler(mux)
+
+	srv := &http.Server{Addr: addr, Handler: corsHandler}
 
 	go func() {
 		httpRoute.Register(mux, webrtcHandler, segmentHandler)
