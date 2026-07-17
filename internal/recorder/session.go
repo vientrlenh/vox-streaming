@@ -57,6 +57,10 @@ func StartSession(
 	audioReceiver *webrtc.RTPReceiver,
 	logger *zap.Logger,
 ) (*Session, error) {
+	if err := os.MkdirAll(tempDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create segment temp dir: %w", err)
+	}
+	
 	ports, err := alloc.Allocate()
 	if err != nil {
 		return nil, fmt.Errorf("allocate ports: %w", err)
