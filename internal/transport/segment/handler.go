@@ -1,6 +1,7 @@
 package segment
 
 import (
+	"slices"
 	"context"
 	"io"
 	"net/http"
@@ -51,13 +52,7 @@ func (h *SegmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	startedAtStr := q.Get("startedAt")
 	endedAtStr := q.Get("endedAt")
 
-	allowed := false
-	for _, id := range claims.RoomIDs {
-		if id == roomID {
-			allowed = true
-			break
-		}
-	}
+	allowed := slices.Contains(claims.RoomIDs, roomID)
 
 	if !allowed {
 		http.Error(w, "forbidden: wrong room", http.StatusForbidden)
@@ -103,6 +98,7 @@ func (h *SegmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	req := usecase.SegmentUploadRequest{
 		StreamID: streamID, 
 		ParticipantID: claims.UserID,
+		SessionID: claims.SessionID,
 		RoomID: roomID,
 		StreamType: streamType, 
 		Seq: seq, 
@@ -147,13 +143,7 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	streamID := q.Get("streamId")
 	streamType := q.Get("streamType")
 
-	allowed := false
-	for _, id := range claims.RoomIDs {
-		if id == roomID {
-			allowed = true
-			break
-		}
-	}
+	allowed := slices.Contains(claims.RoomIDs, roomID)
 	if !allowed {
 		http.Error(w, "forbidden: wrong room", http.StatusForbidden)
 		return
@@ -169,7 +159,8 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 
 	req := usecase.SegmentUploadRequest{
 		StreamID: streamID,
-		ParticipantID: claims.UserID,
+		ParticipantID: claims.UserID, 
+		SessionID: claims.SessionID,
 		RoomID: roomID,
 		StreamType: streamType,
 	}
@@ -188,7 +179,7 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	// response on it. r.Context() is cancelled once we return, so use a fresh
 	// background context for the detached work.
 	go func() {
-		if err := h.assembler.Assemble(context.Background(), roomID, streamID); err != nil {
+		if err := h.assembler.Assemble(context.Background(), roomID, claims.SessionID, streamID); err != nil {
 			h.logger.Error("assembly after completion failed",
 				zap.String("streamId", streamID),
 				zap.Error(err),

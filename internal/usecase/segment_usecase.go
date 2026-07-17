@@ -13,6 +13,7 @@ import (
 type SegmentUploadRequest struct {
 	StreamID      string
 	ParticipantID string
+	SessionID     string
 	RoomID        string
 	StreamType    string
 	Seq           int64
@@ -66,7 +67,7 @@ func (u *SegmentUseCase) Upload(ctx context.Context, req SegmentUploadRequest) e
 		return fmt.Errorf("streamId mismatch: expected %s, got %s", session.StreamID, req.StreamID)
 	}
 
-	key, err := u.storage.UploadSegment(ctx, req.RoomID, req.StreamID, req.Seq, req.Data)
+	key, err := u.storage.UploadSegment(ctx, req.RoomID, req.SessionID, req.StreamID, req.Seq, req.Data)
 	if err != nil {
 		return fmt.Errorf("upload segment: %w", err)
 	}

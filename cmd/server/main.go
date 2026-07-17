@@ -589,7 +589,7 @@ func handleAssembly(uc *usecase.AssemblerUseCase) queue.HandlerFunc {
 		if err := json.Unmarshal(msg.Value, &event); err != nil {
 			return fmt.Errorf("unmarshal stream ended for assembly: %w", err)
 		}
-		return uc.OnStreamEnded(ctx, event.RoomID, event.StreamID)
+		return uc.OnStreamEnded(ctx, event.RoomID, event.SessionID, event.StreamID)
 	}
 }
 

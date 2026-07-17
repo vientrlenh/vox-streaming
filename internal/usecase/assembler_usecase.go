@@ -59,17 +59,17 @@ func NewAssemblerUseCase(
 // grace period — the Kafka consumer this feeds is a single sequential
 // goroutine, and blocking it would queue up every other student's
 // stream.ended behind this one.
-func (u *AssemblerUseCase) OnStreamEnded(ctx context.Context, roomID, streamID string) error {
+func (u *AssemblerUseCase) OnStreamEnded(ctx context.Context, roomID, sessionID, streamID string) error {
 	complete, err := u.segments.IsComplete(ctx, streamID)
 	if err != nil {
 		return err // infra error - let Kafka retry
 	}
 	if complete {
-		return u.Assemble(ctx, roomID, streamID) // fast path, still covered by Kafka retry
+		return u.Assemble(ctx, roomID, sessionID, streamID) // fast path, still covered by Kafka retry
 	}
 
 	time.AfterFunc(u.gracePeriod, func() {
-		if err := u.Assemble(context.Background(), roomID, streamID); err != nil {
+		if err := u.Assemble(context.Background(), roomID, sessionID, streamID); err != nil {
 			u.logger.Error("fallback assembly failed",
 				zap.String("streamId", streamID),
 				zap.Error(err),
@@ -79,7 +79,7 @@ func (u *AssemblerUseCase) OnStreamEnded(ctx context.Context, roomID, streamID s
 	return nil
 }
 
-func (u *AssemblerUseCase) Assemble(ctx context.Context, roomID, streamID string) error {
+func (u *AssemblerUseCase) Assemble(ctx context.Context, roomID, sessionID, streamID string) error {
 	if _, alreadyRunning := u.inFlight.LoadOrStore(streamID, struct{}{}); alreadyRunning {
 		return nil // completion and timeout triggers raced - the other one owns this jobDir
 	}
@@ -108,7 +108,7 @@ func (u *AssemblerUseCase) Assemble(ctx context.Context, roomID, streamID string
 	)
 
 	// Idempotency check
-	exists, err := u.storage.RecordingExists(ctx, roomID, streamID)
+	exists, err := u.storage.RecordingExists(ctx, roomID, sessionID, streamID)
 	if err != nil {
 		return fmt.Errorf("check existing recording: %w", err)
 	}
@@ -170,7 +170,7 @@ func (u *AssemblerUseCase) Assemble(ctx context.Context, roomID, streamID string
 	}
 	defer f.Close()
 
-	recordingKey, err := u.storage.UploadFinalRecording(ctx, roomID, streamID, f)
+	recordingKey, err := u.storage.UploadFinalRecording(ctx, roomID, sessionID, streamID, f)
 	if err != nil {
 		return fmt.Errorf("upload final recording: %w", err)
 	}

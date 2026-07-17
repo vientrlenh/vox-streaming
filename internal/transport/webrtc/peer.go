@@ -97,6 +97,7 @@ func (st *ffmpegIngestState) forwardAudio(raw []byte) {
 type Peer struct {
 	pc            *webrtc.PeerConnection
 	roomID        string
+	sessionID 	  string
 	participantID string
 	streamID      string
 	streamType    string
@@ -130,7 +131,7 @@ type Peer struct {
 
 func NewPeer(
 	cfg PeerConfig,
-	roomID, participantID, streamType string,
+	roomID, sessionID, participantID, streamType string,
 	streamUseCase *usecase.StreamUseCase, 
 	monitorUseCase *usecase.MonitorUseCase,
 	storage *storage.Client, 
@@ -160,6 +161,7 @@ func NewPeer(
 		pc:            pc,
 		roomID:        roomID,
 		participantID: participantID,
+		sessionID: sessionID,
 		streamID:      streamID,
 		streamType:    streamType,
 		startedAt:     time.Now().UTC(),
@@ -196,7 +198,7 @@ func (p *Peer) setupCallbacks() {
 			p.startOnce.Do(func() {
 				ctx := context.Background()
 				if err := p.streamUseCase.NotifyStreamStarted(
-					ctx, p.roomID, p.participantID, p.streamID, p.streamType,
+					ctx, p.roomID, p.sessionID, p.participantID, p.streamID, p.streamType,
 				); err != nil {
 					p.logger.Error("notify stream started failed", zap.Error(err))
 				}
@@ -461,7 +463,7 @@ func (p *Peer) uploadFFmpegSegmentOnce(ctx context.Context, path string, seq int
 		return "", fmt.Errorf("open segment: %w", err)
 	}
 	defer f.Close()
-	return p.storage.UploadFFmpegSegment(attemptCtx, p.roomID, p.streamID, seq, f)
+	return p.storage.UploadFFmpegSegment(attemptCtx, p.roomID, p.sessionID, p.streamID, seq, f)
 }
 
 func (p *Peer) scheduleClose(d time.Duration) {
@@ -566,7 +568,7 @@ func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
 				defer capturing.Store(false)
 				frameURL := p.captureAndUpload(ctx, fe, s)
 				if err := p.streamUseCase.PublishFrame(
-					ctx, p.roomID, p.participantID, p.streamID, p.streamType, frameURL, s,
+					ctx, p.roomID, p.sessionID, p.participantID, p.streamID, p.streamType, frameURL, s,
 				); err != nil {
 					p.logger.Warn("publish frame failed",
 						zap.Int64("seq", s),
@@ -818,7 +820,7 @@ func (p *Peer) close() {
 			}
 		}
 		if err := p.streamUseCase.NotifyStreamEnded(
-			ctx, p.roomID, p.participantID, p.streamID, p.streamType, segmentKeys, duration,
+			ctx, p.roomID, p.sessionID, p.participantID, p.streamID, p.streamType, segmentKeys, duration,
 		); err != nil {
 			p.logger.Error("notify stream ended failed", zap.Error(err))
 		}

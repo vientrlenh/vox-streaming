@@ -174,25 +174,17 @@ func frameKey(roomID, streamID string, seq int64) string {
 	return fmt.Sprintf("rooms/%s/streams/%s/%010d.264", roomID, streamID, seq)
 }
 
-// rooms/{roomID}/streams/{streamID}.webm (hoặc .mp4)
-func recordingKey(roomID, streamID, contentType string) string {
-	ext := "webm"
-	if contentType == "video/mp4" {
-		ext = "mp4"
-	}
-	return fmt.Sprintf("rooms/%s/streams/%s.%s", roomID, streamID, ext)
-}
 
 func (c *Client) PresignExpiry() time.Duration {
 	return c.cfg.PresignExpiry
 }
 
-func segmentKey(roomID, streamID string, seq int64) string {
-	return fmt.Sprintf("rooms/%s/streams/%s/segments/%04d.mp4", roomID, streamID, seq)
+func segmentKey(roomID, sessionID, streamID string, seq int64) string {
+	return fmt.Sprintf("rooms/%s/sessions/%s/streams/%s/segments/%04d.mp4", roomID, sessionID, streamID, seq)
 }
 
-func (c *Client) UploadSegment(ctx context.Context, roomID, streamID string, seq int64, data []byte) (string, error) {
-	key := segmentKey(roomID, streamID, seq)
+func (c *Client) UploadSegment(ctx context.Context, roomID, sessionID, streamID string, seq int64, data []byte) (string, error) {
+	key := segmentKey(roomID, sessionID, streamID, seq)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(c.cfg.RecordingBucket), 
 		Key: aws.String(key), 
@@ -206,8 +198,8 @@ func (c *Client) UploadSegment(ctx context.Context, roomID, streamID string, seq
 }
 
 
-func (c *Client) UploadServerSegment(ctx context.Context, roomID, streamID string, seq int64, r io.Reader) (string, error) {
-	key := fmt.Sprintf("rooms/%s/streams/%s/server-segments/%04d.mp4", roomID, streamID, seq)
+func (c *Client) UploadServerSegment(ctx context.Context, roomID, sessionID, streamID string, seq int64, r io.Reader) (string, error) {
+	key := fmt.Sprintf("rooms/%s/sessions/%s/streams/%s/server-segments/%04d.mp4", roomID, sessionID, streamID, seq)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(c.cfg.RecordingBucket),
 		Key: aws.String(key), 
@@ -220,13 +212,13 @@ func (c *Client) UploadServerSegment(ctx context.Context, roomID, streamID strin
 	return key, nil
 }
 
-func ffmpegSegmentKey(roomID, streamID string, seq int64) string {
-	return fmt.Sprintf("rooms/%s/streams/%s/ffmpeg-segments/%04d.mp4", roomID, streamID, seq)
+func ffmpegSegmentKey(roomID, sessionID, streamID string, seq int64) string {
+	return fmt.Sprintf("rooms/%s/sessions/%s/streams/%s/ffmpeg-segments/%04d.mp4", roomID, sessionID, streamID, seq)
 }
 
 
-func (c *Client) UploadFFmpegSegment(ctx context.Context, roomID, streamID string, seq int64, r io.Reader) (string, error) {
-	key := ffmpegSegmentKey(roomID, streamID, seq)
+func (c *Client) UploadFFmpegSegment(ctx context.Context, roomID, sessionID, streamID string, seq int64, r io.Reader) (string, error) {
+	key := ffmpegSegmentKey(roomID, sessionID, streamID, seq)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(c.cfg.RecordingBucket),
 		Key:         aws.String(key),
@@ -239,21 +231,21 @@ func (c *Client) UploadFFmpegSegment(ctx context.Context, roomID, streamID strin
 	return key, nil
 }
 
-func finalRecordingKey(roomID, streamID string) string {
-	return fmt.Sprintf("rooms/%s/streams/%s/recording.mp4", roomID, streamID)
+func finalRecordingKey(roomID, sessionID, streamID string) string {
+	return fmt.Sprintf("rooms/%s/sessions/%s/streams/%s/recording.mp4", roomID, sessionID, streamID)
 }
 
 
 // check finalized mp4 file was assemblized and uploaded yet
 // to make sure idempotency for assembler consumer
-func (c *Client) RecordingExists(ctx context.Context, roomID, streamID string) (bool, error) {
+func (c *Client) RecordingExists(ctx context.Context, roomID, sessionID, streamID string) (bool, error) {
+	key := finalRecordingKey(roomID, sessionID, streamID)
 	_, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(c.cfg.RecordingBucket), 
-		Key: aws.String(finalRecordingKey(roomID, streamID)),
+		Key: aws.String(key),
 	})
 	if err != nil {
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) {
+		if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
 			code := apiErr.ErrorCode()
 			if code == "NotFound" || code == "NoSuchKey" {
 				return false, nil
@@ -300,8 +292,8 @@ func (c *Client) DownloadSegmentToFile(ctx context.Context, key, dstPath string)
 	return nil
 }
 
-func (c *Client) UploadFinalRecording(ctx context.Context, roomID, streamID string, r io.Reader) (string, error) {
-	key := finalRecordingKey(roomID, streamID)
+func (c *Client) UploadFinalRecording(ctx context.Context, roomID, sessionID, streamID string, r io.Reader) (string, error) {
+	key := finalRecordingKey(roomID, sessionID, streamID)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(c.cfg.RecordingBucket), 
 		Key: aws.String(key), 

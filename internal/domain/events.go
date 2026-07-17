@@ -16,6 +16,7 @@ const (
 type FrameReadyEvent struct {
 	EventID       string    `json:"eventId"`
 	RoomID        string    `json:"roomId"`
+	SessionID 	  string 	`json:"sessionId"`
 	ParticipantID string    `json:"participantId"`
 	StreamID      string    `json:"streamId"`
 	StreamType    string    `json:"streamType"`
@@ -27,6 +28,7 @@ type FrameReadyEvent struct {
 type StreamStartedEvent struct {
 	EventID       string    `json:"eventId"`
 	RoomID        string    `json:"roomId"`
+	SessionID 	  string 	`json:"sessionId"`
 	ParticipantID string    `json:"participantId"`
 	StreamID      string    `json:"streamId"`
 	StreamType    string    `json:"streamType"`
@@ -36,6 +38,7 @@ type StreamStartedEvent struct {
 type StreamEndedEvent struct {
 	EventID       string    `json:"eventId"`
 	RoomID        string    `json:"roomId"`
+	SessionID  	  string	`json:"sessionId"`
 	ParticipantID string    `json:"participantId"`
 	StreamID      string    `json:"streamId"`
 	StreamType    string    `json:"streamType"`
