@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -14,11 +15,13 @@ import (
 
 	"github.com/joho/godotenv"
 	pwebrtc "github.com/pion/webrtc/v4"
+	"github.com/rs/cors"
 	"github.com/segmentio/kafka-go"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/queue"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
+	"github.com/vientrlenh/vox-streaming/internal/recorder"
 	grpcclient "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
 	grpctransport "github.com/vientrlenh/vox-streaming/internal/transport/grpc/server"
 	httpRoute "github.com/vientrlenh/vox-streaming/internal/transport/http"
@@ -79,6 +82,25 @@ func main() {
 		frameIntervalSecs = 5
 	}
 
+	// Build the shared WebRTC API once. WEBRTC_UDP_PORT muxes all peer media onto
+	// a single UDP port (expose just that port in containers); WEBRTC_NAT_1TO1_IP
+	// advertises the server's public IP for host candidates behind a 1:1 NAT.
+	webrtcUDPPort, _ := strconv.Atoi(os.Getenv("WEBRTC_UDP_PORT"))
+	var natIPs []string
+	if raw := os.Getenv("WEBRTC_NAT_1TO1_IP"); raw != "" {
+		natIPs = strings.Split(raw, ",")
+	}
+	webrtcAPI, webrtcAPIClose, err := webrtctransport.NewWebRTCAPI(webrtctransport.ICEConfig{
+		UDPPort:    webrtcUDPPort,
+		NAT1To1IPs: natIPs,
+	}, logger)
+	if err != nil {
+		logger.Fatal("webrtc api init failed", zap.Error(err))
+	}
+	defer webrtcAPIClose()
+
+	aiRelayQueueSize, _ := strconv.Atoi(os.Getenv("AI_RELAY_QUEUE_SIZE"))
+
 	allowedOrigins := parseAllowedOrigins()
 
 	jwtValidator, err := auth.NewValidator()
@@ -98,7 +120,7 @@ func main() {
 	broadCaster := webrtctransport.NewRedisBroadcaster(redisClient, logger)
 
 	streamUseCase := usecase.NewStreamUseCase(publisher, sessionRegistry, logger)
-	monitorUseCase := usecase.NewMonitorUseCase(sessionRegistry, broadCaster, broadCaster, logger)
+	monitorUseCase := usecase.NewMonitorUseCase(sessionRegistry, broadCaster, broadCaster, publisher, logger)
 
 	alertServer := grpctransport.NewAlertServer(monitorUseCase, logger)
 
@@ -137,13 +159,46 @@ func main() {
 	storageClient := ensureStorage(startupCtx, logger)
 	segmentRegistry := cache.NewSegmentRegistry(redisClient)
 	segmentUseCase := usecase.NewSegmentUseCase(storageClient, segmentRegistry, sessionRegistry, logger)
-	segmentHandler := segmenttransport.NewSegmentHandler(segmentUseCase, jwtValidator, logger)
+
+	// grace period the assembler waits after stream.ended for a client
+	// completion signal before assembling with whatever segments have arrived
+	assemblyGraceSecs, _ := strconv.Atoi(os.Getenv("ASSEMBLY_GRACE_PERIOD_SECS"))
+	if assemblyGraceSecs == 0 {
+		assemblyGraceSecs = 90
+	}
+	assemblerUseCase := usecase.NewAssemblerUseCase(
+		storageClient, examClient, segmentRegistry,
+		time.Duration(assemblyGraceSecs)*time.Second,
+		logger,
+	)
+	segmentHandler := segmenttransport.NewSegmentHandler(segmentUseCase, assemblerUseCase, jwtValidator, logger)
+
+	ffmpegIngestOpts := buildFFmpegIngestOptions(logger)
+
+	tempDir := os.Getenv("SEGMENT_TEMP_DIR")
+	sweepTTLHours, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_TEMP_TTL_HOURS"))
+	if sweepTTLHours == 0 {
+		sweepTTLHours = 24
+	}
+	recorder.StartTempDirSweep(
+		context.Background(),
+		filepath.Join(tempDir, "ffmpeg-ingest"),
+		time.Duration(sweepTTLHours)*time.Hour,
+		logger,
+	)
 
 	webrtcHandler := webrtctransport.NewHandler(
 		webrtctransport.PeerConfig{
+			API:           webrtcAPI,
 			ICEServers:    iceServers,
 			FrameInterval: time.Duration(frameIntervalSecs) * time.Second,
-			TempDir:       os.Getenv("SEGMENT_TEMP_DIR"),
+			TempDir:       tempDir,
+			AIRelay: webrtctransport.AIRelayOptions{
+				Enabled:   os.Getenv("AI_RELAY_ENABLED") == "true",
+				URL:       os.Getenv("AI_WEBRTC_URL"),
+				QueueSize: aiRelayQueueSize,
+			},
+			FFmpegIngest: ffmpegIngestOpts,
 		},
 		streamUseCase,
 		monitorUseCase,
@@ -152,7 +207,8 @@ func main() {
 		jwtValidator,
 		broadCaster,
 		examClient,
-		storageClient,
+		storageClient, 
+		segmentRegistry, 
 	)
 
 	addr := os.Getenv("WEBRTC_ADDR")
@@ -160,7 +216,15 @@ func main() {
 		addr = ":8080"
 	}
 	mux := http.NewServeMux()
-	srv := &http.Server{Addr: addr, Handler: mux}
+	c := cors.New(cors.Options{
+		AllowedOrigins: allowedOrigins, 
+		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"}, 
+		AllowedHeaders: []string{"Content-Type", "Authorization"}, 
+		AllowCredentials: true,
+	})
+	corsHandler := c.Handler(mux)
+
+	srv := &http.Server{Addr: addr, Handler: corsHandler}
 
 	go func() {
 		httpRoute.Register(mux, webrtcHandler, segmentHandler)
@@ -242,7 +306,6 @@ func main() {
 	assemblerKafkaCfg := kafkaCfg
 	assemblerKafkaCfg.GroupID = "vox-assembler"
 
-	assemblerUseCase := usecase.NewAssemblerUseCase(storageClient, examClient, logger)
 	assemblerConsumer := queue.NewConsumer(
 		assemblerKafkaCfg,
 		domain.TopicStreamEnded,
@@ -388,8 +451,6 @@ func handleStreamEnded(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.Han
 
 		mu.NotifyLeft(ctx, event.RoomID, event.ParticipantID, event.StreamID, event.StreamType)
 
-		// notify qua Spring Boot bằng GRPC để cập nhật dữ liệu trạng thái vào DB
-		// ...
 		return nil
 	}
 }
@@ -435,6 +496,64 @@ func parseAllowedOrigins() []string {
 	return origins
 }
 
+
+func buildFFmpegIngestOptions(logger *zap.Logger) webrtctransport.FFmpegIngestOptions {
+	rangeStart, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_PORT_RANGE_START"))
+	if rangeStart == 0 {
+		rangeStart = 40000
+	}
+	rangeEnd, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_PORT_RANGE_END"))
+	if rangeEnd == 0 {
+		rangeEnd = 41999
+	}
+	alloc, err := recorder.NewPortAllocator(rangeStart, rangeEnd)
+	if err != nil {
+		logger.Fatal("ffmpeg ingest port allocator init failed", zap.Error(err))
+	}
+
+	segmentSeconds, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_SEGMENT_SECONDS"))
+	if segmentSeconds == 0 {
+		segmentSeconds = 30
+	}
+	maxConcurrent, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_MAX_CONCURRENT"))
+	if maxConcurrent == 0 {
+		maxConcurrent = 10
+	}
+	maxRestartAttempts, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_MAX_RESTART_ATTEMPTS"))
+	if maxRestartAttempts == 0 {
+		maxRestartAttempts = 3
+	}
+
+	stopTimeoutSecs, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_STOP_TIMEOUT_SECS"))
+	if stopTimeoutSecs == 0 {
+		stopTimeoutSecs = 5
+	}
+
+	reorderQueueSize, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_REORDER_QUEUE_SIZE"))
+
+	maxDelayMs, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_MAX_DELAY_MS"))
+
+	logger.Info("ffmpeg ingest bridge enabled",
+		zap.Int("portRangeStart", rangeStart),
+		zap.Int("portRangeEnd", rangeEnd),
+		zap.Int("segmentSeconds", segmentSeconds),
+		zap.Int("maxConcurrentRecorders", maxConcurrent),
+		zap.Int("maxRestartAttempts", maxRestartAttempts),
+		zap.Int("stopTimeoutSecs", stopTimeoutSecs),
+		zap.Int("reorderQueueSize", reorderQueueSize),
+		zap.Int("maxDelayMs", maxDelayMs),
+	)
+	return webrtctransport.FFmpegIngestOptions{
+		Allocator:          alloc,
+		RecordSem:          make(chan struct{}, maxConcurrent),
+		SegmentSeconds:     segmentSeconds,
+		ReorderQueueSize:   reorderQueueSize,
+		MaxDelayMicros:     maxDelayMs * 1000,
+		MaxRestartAttempts: maxRestartAttempts,
+		StopTimeout:        time.Duration(stopTimeoutSecs) * time.Second,
+	}
+}
+
 func ensureStorage(startupCtx context.Context, logger *zap.Logger) *storage.Client {
 	storageEndpoint := os.Getenv("STORAGE_ENDPOINT")
 	storageCfg := storage.DefaultConfig(
@@ -470,7 +589,7 @@ func handleAssembly(uc *usecase.AssemblerUseCase) queue.HandlerFunc {
 		if err := json.Unmarshal(msg.Value, &event); err != nil {
 			return fmt.Errorf("unmarshal stream ended for assembly: %w", err)
 		}
-		return uc.Assemble(ctx, event)
+		return uc.OnStreamEnded(ctx, event.RoomID, event.SessionID, event.StreamID)
 	}
 }
 

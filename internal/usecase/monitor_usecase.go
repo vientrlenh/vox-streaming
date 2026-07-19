@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"go.uber.org/zap"
@@ -38,19 +39,25 @@ type AlertEventer interface {
 	SubscribeAlerts(ctx context.Context, roomID string) <-chan domain.AlertEvent
 }
 
+type AlertRaisedPublisher interface {
+	PublishAlertRaised(ctx context.Context, event domain.AlertRaisedEvent) error
+}
+
 type MonitorUseCase struct {
 	scanner SessionScanner
 	participantEventer ParticipantEventer
 	alertEventer AlertEventer
+	alertPublisher AlertRaisedPublisher
 	logger *zap.Logger
 }
 
 
-func NewMonitorUseCase(scanner SessionScanner, participantEventer ParticipantEventer, alertEventer AlertEventer, logger *zap.Logger) *MonitorUseCase {
+func NewMonitorUseCase(scanner SessionScanner, participantEventer ParticipantEventer, alertEventer AlertEventer, alertPublisher AlertRaisedPublisher, logger *zap.Logger) *MonitorUseCase {
 	return &MonitorUseCase{
 		scanner: scanner, 
 		participantEventer: participantEventer,
-		alertEventer: alertEventer,
+		alertEventer: alertEventer, 
+		alertPublisher: alertPublisher,
 		logger: logger,
 	}
 }
@@ -141,15 +148,48 @@ func (u *MonitorUseCase) SubscribeEvents(ctx context.Context, roomID string) <-c
 }
 
 
-func (u *MonitorUseCase) PublishAlert(ctx context.Context, roomID, participantID, streamID, alertType string, confidence float64, capturedAt time.Time) error {
-	return u.alertEventer.PublishAlertEvent(ctx, roomID, domain.AlertEvent{
-		RoomID: roomID, 
-		ParticipantID: participantID, 
-		StreamID: streamID, 
-		AlertType: alertType, 
-		Confidence: confidence, 
-		CapturedAt: capturedAt,
-	})
+func (u *MonitorUseCase) PublishAlert(ctx context.Context, alert domain.AlertEvent, eventID string) error {
+	if eventID == "" {
+		eventID = uuid.NewString()
+	}
+	if alert.Level == "" {
+		alert.Level = domain.DefaultAlertLevel(alert.AlertType)
+	}
+	if alert.CapturedAt.IsZero() {
+		alert.CapturedAt = time.Now().UTC()
+	}
+
+	// redis pub/sub live, do not block because of kafka
+	liveErr := u.alertEventer.PublishAlertEvent(ctx, alert.RoomID, alert)
+	if liveErr != nil {
+		u.logger.Warn("live alert publish failed", 
+			zap.String("roomId", alert.RoomID), 
+			zap.String("alertType", alert.AlertType), 
+			zap.Error(liveErr),
+		)
+	}
+
+	// durable - kafka exam.alert.raised (persist/flag/audit)
+	var durErr error
+	if u.alertPublisher != nil {
+		durErr = u.alertPublisher.PublishAlertRaised(ctx, domain.AlertRaisedEvent{
+			EventID: uuid.NewString(), 
+			RaisedAt: time.Now().UTC(),
+			AlertEvent: alert,
+		}, )
+		if durErr != nil {
+			u.logger.Error("durable alert publish failed", 
+				zap.String("roomId", alert.RoomID), 
+				zap.String("alertType", alert.AlertType), 
+				zap.Error(durErr),
+			)
+		}
+	}
+
+	if liveErr != nil && durErr != nil {
+		return fmt.Errorf("alert delivery failed: live=%v durable=%v", liveErr, durErr)
+	}
+	return nil
 }
 
 

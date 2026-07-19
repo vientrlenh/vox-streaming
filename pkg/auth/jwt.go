@@ -20,6 +20,7 @@ const (
 
 type StreamClaims struct {
 	UserID      string   `json:"userId"`
+	SessionID 	string 	 `json:"sessionId"`
 	RoomIDs     []string `json:"roomIds"`
 	ExamID      string   `json:"examId"`
 	Roles       []string `json:"roles"`

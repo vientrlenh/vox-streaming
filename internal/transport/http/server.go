@@ -14,5 +14,6 @@ func Register(mux *http.ServeMux, webrtcHandler *webrtc.Handler, segmentHandler 
 	mux.HandleFunc("/rooms/active", webrtcHandler.GetActiveRooms)
 
 	mux.HandleFunc("POST /stream/segment", segmentHandler.Upload)
+	mux.HandleFunc("POST /stream/segment/complete", segmentHandler.Complete)
 }
 
