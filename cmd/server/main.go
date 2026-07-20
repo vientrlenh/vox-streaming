@@ -570,6 +570,9 @@ func ensureStorage(startupCtx context.Context, logger *zap.Logger) *storage.Clie
 	if b := os.Getenv("STORAGE_RECORDING_BUCKET"); b != "" {
 		storageCfg.RecordingBucket = b
 	}
+	if r := os.Getenv("STORAGE_REGION"); r != "" {
+		storageCfg.Region = r
+	}
 	storageCfg.UseSSL = os.Getenv("STORAGE_USE_SSL") == "true"
 	if presignMins := os.Getenv("STORAGE_PRESIGN_MINUTES"); presignMins != "" {
 		if m, err := strconv.Atoi(presignMins); err == nil {
