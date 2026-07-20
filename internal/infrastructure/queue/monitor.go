@@ -87,7 +87,7 @@ var DefaultAlertConfigs = map[string]AlertConfig{
 		LagDuration:  1 * time.Minute,
 		DLQThreshold: 3,
 	},
-	domain.TopicRoomClosed: {
+	domain.TopicScheduleClosed: {
 		LagThreshold: 5,
 		LagDuration:  30 * time.Second,
 		DLQThreshold: 1, // alert to all

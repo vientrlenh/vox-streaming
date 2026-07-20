@@ -11,7 +11,7 @@ import (
 func Register(mux *http.ServeMux, webrtcHandler *webrtc.Handler, segmentHandler *segment.SegmentHandler) {
 	mux.HandleFunc("/ws/stream", webrtcHandler.ServeStream)
 	mux.HandleFunc("/ws/monitor", webrtcHandler.ServeMonitor)
-	mux.HandleFunc("/rooms/active", webrtcHandler.GetActiveRooms)
+	mux.HandleFunc("/schedules/active", webrtcHandler.GetActiveSchedules)
 
 	mux.HandleFunc("POST /stream/segment", segmentHandler.Upload)
 	mux.HandleFunc("POST /stream/segment/complete", segmentHandler.Complete)

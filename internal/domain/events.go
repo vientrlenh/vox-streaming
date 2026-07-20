@@ -9,13 +9,13 @@ const (
 	TopicFrameReady    = "exam.frame.ready"
 	TopicStreamStarted = "exam.stream.started"
 	TopicStreamEnded   = "exam.stream.ended"
-	TopicRoomClosed    = "exam.room.closed"
+	TopicScheduleClosed    = "exam.schedule.closed"
 	TopicAlertRaised = "exam.alert.raised"
 )
 
 type FrameReadyEvent struct {
 	EventID       string    `json:"eventId"`
-	RoomID        string    `json:"roomId"`
+	ScheduleID        string    `json:"scheduleId"`
 	SessionID 	  string 	`json:"sessionId"`
 	ParticipantID string    `json:"participantId"`
 	StreamID      string    `json:"streamId"`
@@ -27,7 +27,7 @@ type FrameReadyEvent struct {
 
 type StreamStartedEvent struct {
 	EventID       string    `json:"eventId"`
-	RoomID        string    `json:"roomId"`
+	ScheduleID        string    `json:"scheduleId"`
 	SessionID 	  string 	`json:"sessionId"`
 	ParticipantID string    `json:"participantId"`
 	StreamID      string    `json:"streamId"`
@@ -37,7 +37,7 @@ type StreamStartedEvent struct {
 
 type StreamEndedEvent struct {
 	EventID       string    `json:"eventId"`
-	RoomID        string    `json:"roomId"`
+	ScheduleID        string    `json:"scheduleId"`
 	SessionID  	  string	`json:"sessionId"`
 	ParticipantID string    `json:"participantId"`
 	StreamID      string    `json:"streamId"`
@@ -47,9 +47,9 @@ type StreamEndedEvent struct {
 	EndedAt       time.Time `json:"endedAt"`
 }
 
-type RoomClosedEvent struct {
+type ScheduleClosedEvent struct {
 	EventID  string    `json:"eventId"`
-	RoomID   string    `json:"roomId"`
+	ScheduleID   string    `json:"scheduleId"`
 	ExamID   string    `json:"examId"`
 	ClosedAt time.Time `json:"closedAt"`
 	Reason   string    `json:"reason"`
@@ -94,7 +94,7 @@ func DefaultAlertLevel(alertType string) AlertLevel {
 
 type AlertEvent struct {
 	Source        string     `json:"source"`
-	RoomID        string     `json:"roomId"`
+	ScheduleID        string     `json:"scheduleId"`
 	ParticipantID string     `json:"participantId"`
 	StreamID      string     `json:"streamId"`
 	StreamType    string     `json:"streamType"`
@@ -131,5 +131,5 @@ type EventPublisher interface {
 	PublishFrameReady(ctx context.Context, event FrameReadyEvent) error
 	PublishStreamStarted(ctx context.Context, event StreamStartedEvent) error
 	PublishStreamEnded(ctx context.Context, event StreamEndedEvent) error
-	PublishRoomClosed(ctx context.Context, event RoomClosedEvent) error
+	PublishScheduleClosed(ctx context.Context, event ScheduleClosedEvent) error
 }

@@ -23,7 +23,7 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 		domain.TopicFrameReady,
 		domain.TopicStreamStarted,
 		domain.TopicStreamEnded,
-		domain.TopicRoomClosed, 
+		domain.TopicScheduleClosed, 
 		domain.TopicAlertRaised,
 	}
 
@@ -48,7 +48,7 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 		w := &kafka.Writer{
 			Addr:         kafka.TCP(cfg.Brokers...),
 			Topic:        topic,
-			Balancer:     &kafka.Hash{}, // đảm bảo ordering per room khi cùng room ID và cùng partition
+			Balancer:     &kafka.Hash{}, // make sure per schedule ordering when scheduleID matches and partition matches
 			BatchSize:    cfg.BatchSize,
 			BatchTimeout: cfg.BatchTimeout,
 			Async:        async,
@@ -83,23 +83,23 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 }
 
 func (p *Publisher) PublishFrameReady(ctx context.Context, event domain.FrameReadyEvent) error {
-	return p.publish(ctx, domain.TopicFrameReady, event.RoomID, event)
+	return p.publish(ctx, domain.TopicFrameReady, event.ScheduleID, event)
 }
 
 func (p *Publisher) PublishStreamStarted(ctx context.Context, event domain.StreamStartedEvent) error {
-	return p.publish(ctx, domain.TopicStreamStarted, event.RoomID, event)
+	return p.publish(ctx, domain.TopicStreamStarted, event.ScheduleID, event)
 }
 
 func (p *Publisher) PublishStreamEnded(ctx context.Context, event domain.StreamEndedEvent) error {
-	return p.publish(ctx, domain.TopicStreamEnded, event.RoomID, event)
+	return p.publish(ctx, domain.TopicStreamEnded, event.ScheduleID, event)
 }
 
-func (p *Publisher) PublishRoomClosed(ctx context.Context, event domain.RoomClosedEvent) error {
-	return p.publish(ctx, domain.TopicRoomClosed, event.RoomID, event)
+func (p *Publisher) PublishScheduleClosed(ctx context.Context, event domain.ScheduleClosedEvent) error {
+	return p.publish(ctx, domain.TopicScheduleClosed, event.ScheduleID, event)
 }
 
 func (p *Publisher) PublishAlertRaised(ctx context.Context, event domain.AlertRaisedEvent) error {
-	return p.publish(ctx, domain.TopicAlertRaised, event.RoomID, event)
+	return p.publish(ctx, domain.TopicAlertRaised, event.ScheduleID, event)
 }
 
 func (p *Publisher) publish(ctx context.Context, topic, key string, payload any) error {

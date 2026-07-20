@@ -9,7 +9,7 @@ service AlertService {
 }
 
 message PushAlertRequest {
-	string roomId = 1;
+	string scheduleId = 1;
 	string participantId = 2;
 	string streamId = 3;
 	string alertType = 4;

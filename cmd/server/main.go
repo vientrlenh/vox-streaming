@@ -238,7 +238,7 @@ func main() {
 		domain.TopicFrameReady,
 		domain.TopicStreamStarted,
 		domain.TopicStreamEnded,
-		domain.TopicRoomClosed,
+		domain.TopicScheduleClosed,
 	}
 
 	dlqWriter, err := queue.NewDLQWriter(kafkaCfg, mainTopics, logger)
@@ -425,11 +425,11 @@ func handleStreamStarted(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.H
 		logger.Info(
 			"stream started",
 			zap.String("stream_id", event.StreamID),
-			zap.String("room_id", event.RoomID),
+			zap.String("schedule_id", event.ScheduleID),
 			zap.String("stream_type", event.StreamType),
 		)
 
-		mu.NotifyJoined(ctx, event.RoomID, event.ParticipantID, event.StreamID, event.StreamType)
+		mu.NotifyJoined(ctx, event.ScheduleID, event.ParticipantID, event.StreamID, event.StreamType)
 
 		return nil
 	}
@@ -449,7 +449,7 @@ func handleStreamEnded(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.Han
 			zap.Int64("durationSecs", event.Duration),
 		)
 
-		mu.NotifyLeft(ctx, event.RoomID, event.ParticipantID, event.StreamID, event.StreamType)
+		mu.NotifyLeft(ctx, event.ScheduleID, event.ParticipantID, event.StreamID, event.StreamType)
 
 		return nil
 	}
@@ -589,7 +589,7 @@ func handleAssembly(uc *usecase.AssemblerUseCase) queue.HandlerFunc {
 		if err := json.Unmarshal(msg.Value, &event); err != nil {
 			return fmt.Errorf("unmarshal stream ended for assembly: %w", err)
 		}
-		return uc.OnStreamEnded(ctx, event.RoomID, event.SessionID, event.StreamID)
+		return uc.OnStreamEnded(ctx, event.ScheduleID, event.SessionID, event.StreamID)
 	}
 }
 

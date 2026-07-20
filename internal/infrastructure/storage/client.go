@@ -132,8 +132,8 @@ func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays 
 	return nil
 }
 
-func (c *Client) UploadFrame(ctx context.Context, roomID, streamID string, seq int64, frameData []byte) (string, error) {
-	key := frameKey(roomID, streamID, seq)
+func (c *Client) UploadFrame(ctx context.Context, scheduleID, streamID string, seq int64, frameData []byte) (string, error) {
+	key := frameKey(scheduleID, streamID, seq)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(c.cfg.FrameBucket),
 		Key: aws.String(key), 
@@ -169,9 +169,9 @@ func (c *Client) PresignRecording(ctx context.Context, key string, expiry time.D
 }
 
 
-// rooms/{roomID}/streams/{streamID}/{seq:010d}.264
-func frameKey(roomID, streamID string, seq int64) string {
-	return fmt.Sprintf("rooms/%s/streams/%s/%010d.264", roomID, streamID, seq)
+// schedules/{scheduleID}/streams/{streamID}/{seq:010d}.264
+func frameKey(scheduleID, streamID string, seq int64) string {
+	return fmt.Sprintf("schedules/%s/streams/%s/%010d.264", scheduleID, streamID, seq)
 }
 
 
@@ -179,12 +179,12 @@ func (c *Client) PresignExpiry() time.Duration {
 	return c.cfg.PresignExpiry
 }
 
-func segmentKey(roomID, sessionID, streamID string, seq int64) string {
-	return fmt.Sprintf("rooms/%s/sessions/%s/streams/%s/segments/%04d.mp4", roomID, sessionID, streamID, seq)
+func segmentKey(scheduleID, sessionID, streamID string, seq int64) string {
+	return fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/segments/%04d.mp4", scheduleID, sessionID, streamID, seq)
 }
 
-func (c *Client) UploadSegment(ctx context.Context, roomID, sessionID, streamID string, seq int64, data []byte) (string, error) {
-	key := segmentKey(roomID, sessionID, streamID, seq)
+func (c *Client) UploadSegment(ctx context.Context, scheduleID, sessionID, streamID string, seq int64, data []byte) (string, error) {
+	key := segmentKey(scheduleID, sessionID, streamID, seq)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(c.cfg.RecordingBucket), 
 		Key: aws.String(key), 
@@ -198,8 +198,8 @@ func (c *Client) UploadSegment(ctx context.Context, roomID, sessionID, streamID 
 }
 
 
-func (c *Client) UploadServerSegment(ctx context.Context, roomID, sessionID, streamID string, seq int64, r io.Reader) (string, error) {
-	key := fmt.Sprintf("rooms/%s/sessions/%s/streams/%s/server-segments/%04d.mp4", roomID, sessionID, streamID, seq)
+func (c *Client) UploadServerSegment(ctx context.Context, scheduleID, sessionID, streamID string, seq int64, r io.Reader) (string, error) {
+	key := fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/server-segments/%04d.mp4", scheduleID, sessionID, streamID, seq)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(c.cfg.RecordingBucket),
 		Key: aws.String(key), 
@@ -212,13 +212,13 @@ func (c *Client) UploadServerSegment(ctx context.Context, roomID, sessionID, str
 	return key, nil
 }
 
-func ffmpegSegmentKey(roomID, sessionID, streamID string, seq int64) string {
-	return fmt.Sprintf("rooms/%s/sessions/%s/streams/%s/ffmpeg-segments/%04d.mp4", roomID, sessionID, streamID, seq)
+func ffmpegSegmentKey(scheduleID, sessionID, streamID string, seq int64) string {
+	return fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/ffmpeg-segments/%04d.mp4", scheduleID, sessionID, streamID, seq)
 }
 
 
-func (c *Client) UploadFFmpegSegment(ctx context.Context, roomID, sessionID, streamID string, seq int64, r io.Reader) (string, error) {
-	key := ffmpegSegmentKey(roomID, sessionID, streamID, seq)
+func (c *Client) UploadFFmpegSegment(ctx context.Context, scheduleID, sessionID, streamID string, seq int64, r io.Reader) (string, error) {
+	key := ffmpegSegmentKey(scheduleID, sessionID, streamID, seq)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(c.cfg.RecordingBucket),
 		Key:         aws.String(key),
@@ -231,15 +231,15 @@ func (c *Client) UploadFFmpegSegment(ctx context.Context, roomID, sessionID, str
 	return key, nil
 }
 
-func finalRecordingKey(roomID, sessionID, streamID string) string {
-	return fmt.Sprintf("rooms/%s/sessions/%s/streams/%s/recording.mp4", roomID, sessionID, streamID)
+func finalRecordingKey(scheduleID, sessionID, streamID string) string {
+	return fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/recording.mp4", scheduleID, sessionID, streamID)
 }
 
 
 // check finalized mp4 file was assemblized and uploaded yet
 // to make sure idempotency for assembler consumer
-func (c *Client) RecordingExists(ctx context.Context, roomID, sessionID, streamID string) (bool, error) {
-	key := finalRecordingKey(roomID, sessionID, streamID)
+func (c *Client) RecordingExists(ctx context.Context, scheduleID, sessionID, streamID string) (bool, error) {
+	key := finalRecordingKey(scheduleID, sessionID, streamID)
 	_, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(c.cfg.RecordingBucket), 
 		Key: aws.String(key),
@@ -292,8 +292,8 @@ func (c *Client) DownloadSegmentToFile(ctx context.Context, key, dstPath string)
 	return nil
 }
 
-func (c *Client) UploadFinalRecording(ctx context.Context, roomID, sessionID, streamID string, r io.Reader) (string, error) {
-	key := finalRecordingKey(roomID, sessionID, streamID)
+func (c *Client) UploadFinalRecording(ctx context.Context, scheduleID, sessionID, streamID string, r io.Reader) (string, error) {
+	key := finalRecordingKey(scheduleID, sessionID, streamID)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(c.cfg.RecordingBucket), 
 		Key: aws.String(key), 
@@ -306,10 +306,10 @@ func (c *Client) UploadFinalRecording(ctx context.Context, roomID, sessionID, st
 	return key, nil
 }
 
-func (c *Client) DownloadFrame(ctx context.Context, roomID, streamID string, seq int64) ([]byte, error) {
+func (c *Client) DownloadFrame(ctx context.Context, scheduleID, streamID string, seq int64) ([]byte, error) {
 	out, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(c.cfg.FrameBucket), 
-		Key: aws.String(frameKey(roomID, streamID, seq)),
+		Key: aws.String(frameKey(scheduleID, streamID, seq)),
 	})
 	if err != nil {
 		return nil,fmt.Errorf("get frame error: %w", err)
@@ -318,8 +318,8 @@ func (c *Client) DownloadFrame(ctx context.Context, roomID, streamID string, seq
 	return io.ReadAll(out.Body)
 }
 
-func (c *Client) UploadFrameJPEG(ctx context.Context, roomID, streamID string, seq int64, data []byte) (string, error) {
-	key := fmt.Sprintf("rooms/%s/streams/%s/%010d.jpg", roomID, streamID, seq)
+func (c *Client) UploadFrameJPEG(ctx context.Context, scheduleID, streamID string, seq int64, data []byte) (string, error) {
+	key := fmt.Sprintf("schedules/%s/streams/%s/%010d.jpg", scheduleID, streamID, seq)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(c.cfg.FrameBucket), 
 		Key: aws.String(key), 

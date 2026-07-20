@@ -14,7 +14,7 @@ type SegmentUploadRequest struct {
 	StreamID      string
 	ParticipantID string
 	SessionID     string
-	RoomID        string
+	ScheduleID        string
 	StreamType    string
 	Seq           int64
 	StartedAt     time.Time
@@ -59,15 +59,15 @@ func NewSegmentUseCase(
 
 func (u *SegmentUseCase) Upload(ctx context.Context, req SegmentUploadRequest) error {
 	// stream_id must belong to active session of participant
-	session, err := u.sessions.Lookup(ctx, req.RoomID, req.ParticipantID, req.StreamType)
+	session, err := u.sessions.Lookup(ctx, req.ScheduleID, req.ParticipantID, req.StreamType)
 	if err != nil || session == nil {
-		return fmt.Errorf("no active session for participant %s in room %s", req.ParticipantID, req.RoomID)
+		return fmt.Errorf("no active session for participant %s in schedule %s", req.ParticipantID, req.ScheduleID)
 	}
 	if session.StreamID != req.StreamID {
 		return fmt.Errorf("streamId mismatch: expected %s, got %s", session.StreamID, req.StreamID)
 	}
 
-	key, err := u.storage.UploadSegment(ctx, req.RoomID, req.SessionID, req.StreamID, req.Seq, req.Data)
+	key, err := u.storage.UploadSegment(ctx, req.ScheduleID, req.SessionID, req.StreamID, req.Seq, req.Data)
 	if err != nil {
 		return fmt.Errorf("upload segment: %w", err)
 	}
@@ -128,9 +128,9 @@ func auditGaps(metas []cache.SegmentMeta) ([]SegmentGap, time.Duration) {
 // for this stream, letting AssemblerUseCase.OnStreamEnded take the fast path
 // instead of waiting out the grace period.
 func (u *SegmentUseCase) MarkComplete(ctx context.Context, req SegmentUploadRequest) error {
-	session, err := u.sessions.Lookup(ctx, req.RoomID, req.ParticipantID, req.StreamType)
+	session, err := u.sessions.Lookup(ctx, req.ScheduleID, req.ParticipantID, req.StreamType)
 	if err != nil || session == nil {
-		return fmt.Errorf("no active session for participant %s in room %s", req.ParticipantID, req.RoomID)
+		return fmt.Errorf("no active session for participant %s in schedule %s", req.ParticipantID, req.ScheduleID)
 	}
 	if session.StreamID != req.StreamID {
 		return fmt.Errorf("streamId mismatch: expected %s, got %s", session.StreamID, req.StreamID)

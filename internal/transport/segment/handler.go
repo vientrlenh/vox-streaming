@@ -45,17 +45,17 @@ func (h *SegmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
-	roomID := q.Get("roomId")
+	scheduleID := q.Get("scheduleId")
 	streamID := q.Get("streamId")
 	streamType := q.Get("streamType")
 	seqStr := q.Get("seq")
 	startedAtStr := q.Get("startedAt")
 	endedAtStr := q.Get("endedAt")
 
-	allowed := slices.Contains(claims.RoomIDs, roomID)
+	allowed := slices.Contains(claims.ScheduleIDs, scheduleID)
 
 	if !allowed {
-		http.Error(w, "forbidden: wrong room", http.StatusForbidden)
+		http.Error(w, "forbidden: wrong schedule", http.StatusForbidden)
 		return
 	}
 
@@ -64,7 +64,7 @@ func (h *SegmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if roomID == "" || streamID == "" || streamType == "" || seqStr == "" {
+	if scheduleID == "" || streamID == "" || streamType == "" || seqStr == "" {
 		http.Error(w, "missing required params", http.StatusBadRequest)
 		return
 	}
@@ -99,7 +99,7 @@ func (h *SegmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		StreamID: streamID, 
 		ParticipantID: claims.UserID,
 		SessionID: claims.SessionID,
-		RoomID: roomID,
+		ScheduleID: scheduleID,
 		StreamType: streamType, 
 		Seq: seq, 
 		StartedAt: startedAt, 
@@ -139,20 +139,20 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
-	roomID := q.Get("roomId")
+	scheduleID := q.Get("scheduleId")
 	streamID := q.Get("streamId")
 	streamType := q.Get("streamType")
 
-	allowed := slices.Contains(claims.RoomIDs, roomID)
+	allowed := slices.Contains(claims.ScheduleIDs, scheduleID)
 	if !allowed {
-		http.Error(w, "forbidden: wrong room", http.StatusForbidden)
+		http.Error(w, "forbidden: wrong schedule", http.StatusForbidden)
 		return
 	}
 	if !claims.IsStudent() {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	if roomID == "" || streamID == "" || streamType == "" {
+	if scheduleID == "" || streamID == "" || streamType == "" {
 		http.Error(w, "missing required params", http.StatusBadRequest)
 		return
 	}
@@ -161,7 +161,7 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 		StreamID: streamID,
 		ParticipantID: claims.UserID, 
 		SessionID: claims.SessionID,
-		RoomID: roomID,
+		ScheduleID: scheduleID,
 		StreamType: streamType,
 	}
 	if err := h.useCase.MarkComplete(r.Context(), req); err != nil {
@@ -179,7 +179,7 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	// response on it. r.Context() is cancelled once we return, so use a fresh
 	// background context for the detached work.
 	go func() {
-		if err := h.assembler.Assemble(context.Background(), roomID, claims.SessionID, streamID); err != nil {
+		if err := h.assembler.Assemble(context.Background(), scheduleID, claims.SessionID, streamID); err != nil {
 			h.logger.Error("assembly after completion failed",
 				zap.String("streamId", streamID),
 				zap.Error(err),

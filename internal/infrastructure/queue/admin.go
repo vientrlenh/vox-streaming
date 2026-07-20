@@ -44,7 +44,7 @@ var RequiredTopics = []TopicSpec{
 		RetentionMS:       86400000,
 	},
 	{
-		Name:              domain.TopicRoomClosed,
+		Name:              domain.TopicScheduleClosed,
 		NumPartitions:     2,
 		ReplicationFactor: 1,
 		RetentionMS:       3600000,

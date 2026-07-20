@@ -59,17 +59,17 @@ func NewAssemblerUseCase(
 // grace period — the Kafka consumer this feeds is a single sequential
 // goroutine, and blocking it would queue up every other student's
 // stream.ended behind this one.
-func (u *AssemblerUseCase) OnStreamEnded(ctx context.Context, roomID, sessionID, streamID string) error {
+func (u *AssemblerUseCase) OnStreamEnded(ctx context.Context, scheduleID, sessionID, streamID string) error {
 	complete, err := u.segments.IsComplete(ctx, streamID)
 	if err != nil {
 		return err // infra error - let Kafka retry
 	}
 	if complete {
-		return u.Assemble(ctx, roomID, sessionID, streamID) // fast path, still covered by Kafka retry
+		return u.Assemble(ctx, scheduleID, sessionID, streamID) // fast path, still covered by Kafka retry
 	}
 
 	time.AfterFunc(u.gracePeriod, func() {
-		if err := u.Assemble(context.Background(), roomID, sessionID, streamID); err != nil {
+		if err := u.Assemble(context.Background(), scheduleID, sessionID, streamID); err != nil {
 			u.logger.Error("fallback assembly failed",
 				zap.String("streamId", streamID),
 				zap.Error(err),
@@ -79,7 +79,7 @@ func (u *AssemblerUseCase) OnStreamEnded(ctx context.Context, roomID, sessionID,
 	return nil
 }
 
-func (u *AssemblerUseCase) Assemble(ctx context.Context, roomID, sessionID, streamID string) error {
+func (u *AssemblerUseCase) Assemble(ctx context.Context, scheduleID, sessionID, streamID string) error {
 	if _, alreadyRunning := u.inFlight.LoadOrStore(streamID, struct{}{}); alreadyRunning {
 		return nil // completion and timeout triggers raced - the other one owns this jobDir
 	}
@@ -103,12 +103,12 @@ func (u *AssemblerUseCase) Assemble(ctx context.Context, roomID, sessionID, stre
 
 	log := u.logger.With(
 		zap.String("streamId", streamID),
-		zap.String("roomId", roomID),
+		zap.String("scheduleId", scheduleID),
 		zap.Int("segmentCount", len(metas)),
 	)
 
 	// Idempotency check
-	exists, err := u.storage.RecordingExists(ctx, roomID, sessionID, streamID)
+	exists, err := u.storage.RecordingExists(ctx, scheduleID, sessionID, streamID)
 	if err != nil {
 		return fmt.Errorf("check existing recording: %w", err)
 	}
@@ -170,13 +170,13 @@ func (u *AssemblerUseCase) Assemble(ctx context.Context, roomID, sessionID, stre
 	}
 	defer f.Close()
 
-	recordingKey, err := u.storage.UploadFinalRecording(ctx, roomID, sessionID, streamID, f)
+	recordingKey, err := u.storage.UploadFinalRecording(ctx, scheduleID, sessionID, streamID, f)
 	if err != nil {
 		return fmt.Errorf("upload final recording: %w", err)
 	}
 
 	durationSecs := int64(metas[len(metas)-1].EndedAt.Sub(metas[0].StartedAt).Seconds())
-	if err := u.examClient.UpdateRecording(ctx, streamID, roomID, recordingKey, durationSecs); err != nil {
+	if err := u.examClient.UpdateRecording(ctx, streamID, scheduleID, recordingKey, durationSecs); err != nil {
 		return fmt.Errorf("notify exam service: %w", err)
 	}
 

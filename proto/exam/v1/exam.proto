@@ -10,7 +10,7 @@ service ExamService {
 }
 
 message ValidateAccessRequest {
-    string roomId = 1;
+    string scheduleId = 1;
     string participantId = 2;
     string streamType = 3;
 }
@@ -22,7 +22,7 @@ message ValidateAccessResponse {
 
 message UpdateRecordingRequest {
     string streamId = 1;
-    string roomId = 2;
+    string scheduleId = 2;
     string recordingUrl = 3;
     int64 durationSecs = 4;
 }

@@ -21,7 +21,7 @@ const (
 type StreamClaims struct {
 	UserID      string   `json:"userId"`
 	SessionID 	string 	 `json:"sessionId"`
-	RoomIDs     []string `json:"roomIds"`
+	ScheduleIDs     []string `json:"scheduleIds"`
 	ExamID      string   `json:"examId"`
 	Roles       []string `json:"roles"`
 	StreamTypes []string `json:"streamTypes,omitempty"`
@@ -32,11 +32,11 @@ func (c *StreamClaims) CanStream(streamType string) bool {
 	return slices.Contains(c.StreamTypes, streamType)
 }
 
-func (c *StreamClaims) CanMonitorRoom(roomID string) bool {
+func (c *StreamClaims) CanMonitorSchedule(scheduleID string) bool {
 	if !c.HasMonitorRole() {
 		return false
 	}
-	return slices.Contains(c.RoomIDs, roomID)
+	return slices.Contains(c.ScheduleIDs, scheduleID)
 }
 
 func (c *StreamClaims) IsStudent() bool {

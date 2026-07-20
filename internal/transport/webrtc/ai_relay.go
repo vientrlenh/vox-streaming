@@ -34,7 +34,7 @@ type AIRelayOptions struct {
 
 // make sure AI detect the correct student
 type RelayMeta struct {
-	RoomID        string
+	ScheduleID        string
 	ParticipantID string
 	StreamID      string
 	StreamType    string
@@ -239,7 +239,7 @@ func (r *AIRelay) negotiate(ctx context.Context) error {
 type aiOfferRequest struct {
 	SDP           string `json:"sdp"`
 	Type          string `json:"type"`
-	RoomID        string `json:"roomId"`
+	ScheduleID        string `json:"scheduleId"`
 	ParticipantID string `json:"participantId"`
 	StreamID      string `json:"streamId"`
 	StreamType    string `json:"streamType"`
@@ -255,7 +255,7 @@ func (r *AIRelay) postOffer(ctx context.Context, sdp string) (answerSDP, connID 
 	reqBody, err := json.Marshal(aiOfferRequest{
 		SDP:           sdp,
 		Type:          "offer",
-		RoomID:        r.meta.RoomID,
+		ScheduleID:        r.meta.ScheduleID,
 		ParticipantID: r.meta.ParticipantID,
 		StreamID:      r.meta.StreamID,
 		StreamType:    r.meta.StreamType,

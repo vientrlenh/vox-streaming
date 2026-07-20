@@ -23,7 +23,7 @@ const (
 
 type ValidateAccessRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	RoomId        string                 `protobuf:"bytes,1,opt,name=roomId,proto3" json:"roomId,omitempty"`
+	ScheduleId    string                 `protobuf:"bytes,1,opt,name=scheduleId,proto3" json:"scheduleId,omitempty"`
 	ParticipantId string                 `protobuf:"bytes,2,opt,name=participantId,proto3" json:"participantId,omitempty"`
 	StreamType    string                 `protobuf:"bytes,3,opt,name=streamType,proto3" json:"streamType,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -60,9 +60,9 @@ func (*ValidateAccessRequest) Descriptor() ([]byte, []int) {
 	return file_exam_v1_exam_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *ValidateAccessRequest) GetRoomId() string {
+func (x *ValidateAccessRequest) GetScheduleId() string {
 	if x != nil {
-		return x.RoomId
+		return x.ScheduleId
 	}
 	return ""
 }
@@ -136,7 +136,7 @@ func (x *ValidateAccessResponse) GetReason() string {
 type UpdateRecordingRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	StreamId      string                 `protobuf:"bytes,1,opt,name=streamId,proto3" json:"streamId,omitempty"`
-	RoomId        string                 `protobuf:"bytes,2,opt,name=roomId,proto3" json:"roomId,omitempty"`
+	ScheduleId    string                 `protobuf:"bytes,2,opt,name=scheduleId,proto3" json:"scheduleId,omitempty"`
 	RecordingUrl  string                 `protobuf:"bytes,3,opt,name=recordingUrl,proto3" json:"recordingUrl,omitempty"`
 	DurationSecs  int64                  `protobuf:"varint,4,opt,name=durationSecs,proto3" json:"durationSecs,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -180,9 +180,9 @@ func (x *UpdateRecordingRequest) GetStreamId() string {
 	return ""
 }
 
-func (x *UpdateRecordingRequest) GetRoomId() string {
+func (x *UpdateRecordingRequest) GetScheduleId() string {
 	if x != nil {
-		return x.RoomId
+		return x.ScheduleId
 	}
 	return ""
 }
@@ -249,19 +249,23 @@ var File_exam_v1_exam_proto protoreflect.FileDescriptor
 
 const file_exam_v1_exam_proto_rawDesc = "" +
 	"\n" +
-	"\x12exam/v1/exam.proto\x12\aexam.v1\"u\n" +
-	"\x15ValidateAccessRequest\x12\x16\n" +
-	"\x06roomId\x18\x01 \x01(\tR\x06roomId\x12$\n" +
+	"\x12exam/v1/exam.proto\x12\aexam.v1\"}\n" +
+	"\x15ValidateAccessRequest\x12\x1e\n" +
+	"\n" +
+	"scheduleId\x18\x01 \x01(\tR\n" +
+	"scheduleId\x12$\n" +
 	"\rparticipantId\x18\x02 \x01(\tR\rparticipantId\x12\x1e\n" +
 	"\n" +
 	"streamType\x18\x03 \x01(\tR\n" +
 	"streamType\"J\n" +
 	"\x16ValidateAccessResponse\x12\x18\n" +
 	"\aallowed\x18\x01 \x01(\bR\aallowed\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\"\x94\x01\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"\x9c\x01\n" +
 	"\x16UpdateRecordingRequest\x12\x1a\n" +
-	"\bstreamId\x18\x01 \x01(\tR\bstreamId\x12\x16\n" +
-	"\x06roomId\x18\x02 \x01(\tR\x06roomId\x12\"\n" +
+	"\bstreamId\x18\x01 \x01(\tR\bstreamId\x12\x1e\n" +
+	"\n" +
+	"scheduleId\x18\x02 \x01(\tR\n" +
+	"scheduleId\x12\"\n" +
 	"\frecordingUrl\x18\x03 \x01(\tR\frecordingUrl\x12\"\n" +
 	"\fdurationSecs\x18\x04 \x01(\x03R\fdurationSecs\"3\n" +
 	"\x17UpdateRecordingResponse\x12\x18\n" +
