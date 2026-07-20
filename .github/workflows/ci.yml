@@ -1,12 +1,14 @@
 name: CI
 
 on:
+  # TEMPORARY -- testing the pipeline on testDeploy before trusting it on
+  # main. Revert to `main` before merging any of this.
   pull_request:
     branches:
-      - main
+      - testDeploy
   push:
     branches:
-      - main
+      - testDeploy
 
 jobs:
   build:
