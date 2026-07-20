@@ -94,23 +94,21 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 	streamType := q.Get("streamType")
 	token := q.Get("token")
 
-	claims, err := h.validator.Validate(token)
+	claims, err := h.validator.ValidateStream(token)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	
+	if !claims.CanAccess(scheduleID, streamType) {
+		http.Error(w, "forbidden: wrong schedule or stream type", http.StatusForbidden)
+		return
+	}
 
-	if !claims.IsStudent() {
-		http.Error(w, "forbbiden: use /ws/monitor for monitoring", http.StatusForbidden)
-		return
-	}
-	if len(claims.ScheduleIDs) != 1 || claims.ScheduleIDs[0] != scheduleID || !claims.CanStream(streamType) {
-		http.Error(w, "forbidden: wrong schedule", http.StatusForbidden)
-		return
-	}
+	participantID := claims.CandidateID
 
 	if h.examClient != nil {
-		allowed, reason, err := h.examClient.ValidateAccess(r.Context(), scheduleID, claims.UserID, streamType)
+		allowed, reason, err := h.examClient.ValidateAccess(r.Context(), scheduleID, participantID, claims.SessionID, streamType)
 		if err != nil {
 			h.logger.Warn("exam validation unavaiable, denying", zap.Error(err))
 			http.Error(w, "exam service unavaiable", http.StatusServiceUnavailable)
@@ -119,7 +117,7 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 		if !allowed {
 			h.logger.Warn("exam access denined", 
 				zap.String("reason", reason), 
-				zap.String("participantId", claims.UserID),
+				zap.String("participantId", participantID),
 			)
 			http.Error(w, reason, http.StatusForbidden)
 			return
@@ -136,7 +134,7 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rawConn.Close()
 
-	peer, err := NewPeer(h.peerCfg, scheduleID, claims.SessionID, claims.UserID, streamType, h.streamUseCase, h.monitorUseCase, h.storage, h.segments, h.logger)
+	peer, err := NewPeer(h.peerCfg, scheduleID, claims.SessionID, participantID, streamType, h.streamUseCase, h.monitorUseCase, h.storage, h.segments, h.logger)
 	if err != nil {
 		h.logger.Error("peer creation failed", zap.Error(err))
 		_ = rawConn.WriteJSON(map[string]string{
@@ -146,17 +144,17 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if old := h.sessions.Replace(scheduleID, claims.UserID, streamType, peer); old != nil {
+	if old := h.sessions.Replace(scheduleID, participantID, streamType, peer); old != nil {
 		old.Close() // explicit close, clear ownership
 		h.logger.Info("replaced existing peer on reconnect", 
-			zap.String("schedule_id", scheduleID), 
-			zap.String("participant_id", claims.UserID), 
-			zap.String("stream_type", streamType),
+			zap.String("scheduleId", scheduleID), 
+			zap.String("participantId", participantID), 
+			zap.String("streamType", streamType),
 		)
 	}
 
 	defer func() {
-		h.sessions.RemoveIfSame(scheduleID, claims.UserID, streamType, peer)
+		h.sessions.RemoveIfSame(scheduleID, participantID, streamType, peer)
 		peer.Close()
 	}()
 
@@ -184,7 +182,7 @@ func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims, err := h.validator.Validate(token)
+	claims, err := h.validator.ValidateMonitor(token)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -292,7 +290,7 @@ func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) GetActiveSchedules(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
-	claims, err := h.validator.Validate(token)
+	claims, err := h.validator.ValidateMonitor(token)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

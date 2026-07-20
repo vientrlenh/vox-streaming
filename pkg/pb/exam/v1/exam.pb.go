@@ -24,8 +24,9 @@ const (
 type ValidateAccessRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ScheduleId    string                 `protobuf:"bytes,1,opt,name=scheduleId,proto3" json:"scheduleId,omitempty"`
-	ParticipantId string                 `protobuf:"bytes,2,opt,name=participantId,proto3" json:"participantId,omitempty"`
+	CandidateId   string                 `protobuf:"bytes,2,opt,name=candidateId,proto3" json:"candidateId,omitempty"`
 	StreamType    string                 `protobuf:"bytes,3,opt,name=streamType,proto3" json:"streamType,omitempty"`
+	ExamSessionId string                 `protobuf:"bytes,4,opt,name=examSessionId,proto3" json:"examSessionId,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -67,9 +68,9 @@ func (x *ValidateAccessRequest) GetScheduleId() string {
 	return ""
 }
 
-func (x *ValidateAccessRequest) GetParticipantId() string {
+func (x *ValidateAccessRequest) GetCandidateId() string {
 	if x != nil {
-		return x.ParticipantId
+		return x.CandidateId
 	}
 	return ""
 }
@@ -77,6 +78,13 @@ func (x *ValidateAccessRequest) GetParticipantId() string {
 func (x *ValidateAccessRequest) GetStreamType() string {
 	if x != nil {
 		return x.StreamType
+	}
+	return ""
+}
+
+func (x *ValidateAccessRequest) GetExamSessionId() string {
+	if x != nil {
+		return x.ExamSessionId
 	}
 	return ""
 }
@@ -249,15 +257,16 @@ var File_exam_v1_exam_proto protoreflect.FileDescriptor
 
 const file_exam_v1_exam_proto_rawDesc = "" +
 	"\n" +
-	"\x12exam/v1/exam.proto\x12\aexam.v1\"}\n" +
+	"\x12exam/v1/exam.proto\x12\aexam.v1\"\x9f\x01\n" +
 	"\x15ValidateAccessRequest\x12\x1e\n" +
 	"\n" +
 	"scheduleId\x18\x01 \x01(\tR\n" +
-	"scheduleId\x12$\n" +
-	"\rparticipantId\x18\x02 \x01(\tR\rparticipantId\x12\x1e\n" +
+	"scheduleId\x12 \n" +
+	"\vcandidateId\x18\x02 \x01(\tR\vcandidateId\x12\x1e\n" +
 	"\n" +
 	"streamType\x18\x03 \x01(\tR\n" +
-	"streamType\"J\n" +
+	"streamType\x12$\n" +
+	"\rexamSessionId\x18\x04 \x01(\tR\rexamSessionId\"J\n" +
 	"\x16ValidateAccessResponse\x12\x18\n" +
 	"\aallowed\x18\x01 \x01(\bR\aallowed\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"\x9c\x01\n" +

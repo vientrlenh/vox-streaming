@@ -74,13 +74,14 @@ func (c *ExamClient) Ping(_ context.Context) error {
 	}
 }
 
-func (c *ExamClient) ValidateAccess(ctx context.Context, scheduleID, participantID, streamType string) (allowed bool, reason string, err error) {
+func (c *ExamClient) ValidateAccess(ctx context.Context, scheduleID, participantID, sessionID, streamType string) (allowed bool, reason string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
 	resp, err := c.client.ValidateAccess(ctx, &examv1.ValidateAccessRequest{
 		ScheduleId: scheduleID, 
-		ParticipantId: participantID, 
+		CandidateId: participantID, 
+		ExamSessionId: sessionID,
 		StreamType: streamType,
 	})
 	if err != nil {

@@ -1,7 +1,6 @@
 package segment
 
 import (
-	"slices"
 	"context"
 	"io"
 	"net/http"
@@ -38,7 +37,7 @@ func (h *SegmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	if len(token) > 7 && token[:7] == "Bearer " {
 		token = token[7:]
 	}
-	claims, err := h.validator.Validate(token)
+	claims, err := h.validator.ValidateStream(token)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -52,15 +51,10 @@ func (h *SegmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	startedAtStr := q.Get("startedAt")
 	endedAtStr := q.Get("endedAt")
 
-	allowed := slices.Contains(claims.ScheduleIDs, scheduleID)
+	allowed := claims.CanAccess(scheduleID, streamType)
 
 	if !allowed {
 		http.Error(w, "forbidden: wrong schedule", http.StatusForbidden)
-		return
-	}
-
-	if !claims.IsStudent() {
-		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -97,7 +91,7 @@ func (h *SegmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	req := usecase.SegmentUploadRequest{
 		StreamID: streamID, 
-		ParticipantID: claims.UserID,
+		ParticipantID: claims.CandidateID,
 		SessionID: claims.SessionID,
 		ScheduleID: scheduleID,
 		StreamType: streamType, 
@@ -132,7 +126,7 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	if len(token) > 7 && token[:7] == "Bearer " {
 		token = token[7:]
 	}
-	claims, err := h.validator.Validate(token)
+	claims, err := h.validator.ValidateStream(token)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -143,15 +137,12 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	streamID := q.Get("streamId")
 	streamType := q.Get("streamType")
 
-	allowed := slices.Contains(claims.ScheduleIDs, scheduleID)
+	allowed := claims.CanAccess(scheduleID, streamType)
 	if !allowed {
 		http.Error(w, "forbidden: wrong schedule", http.StatusForbidden)
 		return
 	}
-	if !claims.IsStudent() {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
+
 	if scheduleID == "" || streamID == "" || streamType == "" {
 		http.Error(w, "missing required params", http.StatusBadRequest)
 		return
@@ -159,7 +150,7 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 
 	req := usecase.SegmentUploadRequest{
 		StreamID: streamID,
-		ParticipantID: claims.UserID, 
+		ParticipantID: claims.CandidateID, 
 		SessionID: claims.SessionID,
 		ScheduleID: scheduleID,
 		StreamType: streamType,

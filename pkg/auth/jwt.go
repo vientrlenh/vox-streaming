@@ -12,19 +12,32 @@ import (
 type Role string
 
 const (
-	RoleStudent     Role = "STUDENT"
 	RoleTeacher     Role = "TEACHER"
 	RoleSchoolAdmin Role = "SCHOOL_ADMIN"
-	RoleSystemAdmin Role = "SYSTEM_ADMIN"
+)
+
+const (
+	TokenUseStream = "stream"
+	TokenUseMonitor = "monitor"
 )
 
 type StreamClaims struct {
+	CandidateID string   `json:"candidateId"`
+	SessionID   string   `json:"sessionId"`
+	ScheduleID  string   `json:"scheduleId"`
+	ExamID      string   `json:"examId"`
+	StreamTypes []string `json:"streamTypes"`
+	TokenUse 	string 	 `json:"tokenUse"`
+	jwt.RegisteredClaims
+}
+
+type MonitorClaims struct {
 	UserID      string   `json:"userId"`
-	SessionID 	string 	 `json:"sessionId"`
-	ScheduleIDs     []string `json:"scheduleIds"`
+	SessionIDs  []string `json:"sessionIds"`
+	ScheduleIDs []string `json:"scheduleIds"`
 	ExamID      string   `json:"examId"`
 	Roles       []string `json:"roles"`
-	StreamTypes []string `json:"streamTypes,omitempty"`
+	TokenUse    string 	 `json:"tokenUse"`
 	jwt.RegisteredClaims
 }
 
@@ -32,22 +45,22 @@ func (c *StreamClaims) CanStream(streamType string) bool {
 	return slices.Contains(c.StreamTypes, streamType)
 }
 
-func (c *StreamClaims) CanMonitorSchedule(scheduleID string) bool {
+func (c *StreamClaims) CanAccess(scheduleID, streamType string) bool {
+	return c.ScheduleID == scheduleID && c.CanStream(streamType)
+}
+
+func (c *MonitorClaims) HasMonitorRole() bool {
+	return c.hasRole(RoleTeacher) || c.hasRole(RoleSchoolAdmin)
+}
+
+func (c *MonitorClaims) CanMonitorSchedule(scheduleID string) bool {
 	if !c.HasMonitorRole() {
 		return false
 	}
 	return slices.Contains(c.ScheduleIDs, scheduleID)
 }
 
-func (c *StreamClaims) IsStudent() bool {
-	return c.hasRole(RoleStudent)
-}
-
-func (c *StreamClaims) HasMonitorRole() bool {
-	return c.hasRole(RoleTeacher) || c.hasRole(RoleSchoolAdmin)
-}
-
-func (c *StreamClaims) hasRole(target Role) bool {
+func (c *MonitorClaims) hasRole(target Role) bool {
 	for _, r := range c.Roles {
 		if Role(r) == target {
 			return true
@@ -70,28 +83,87 @@ func NewValidator() (*Validator, error) {
 	}, nil
 }
 
-func (v *Validator) Validate(tokenStr string) (*StreamClaims, error) {
-	if tokenStr == "" {
-		return nil, errors.New("missing token")
-	}
-	token, err := jwt.ParseWithClaims(
-		tokenStr,
-		&StreamClaims{},
-		func(t *jwt.Token) (any, error) {
-			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-			}
-			return v.secret, nil
-		},
-		jwt.WithExpirationRequired(),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("parse token: %w", err)
+func (v *Validator) ValidateStream(tokenStr string) (*StreamClaims, error) {
+	claims := &StreamClaims{}
+
+	if err := v.parse(tokenStr, claims); err != nil {
+		return nil, err
 	}
 
-	claims, ok := token.Claims.(*StreamClaims)
-	if !ok || !token.Valid {
-		return nil, errors.New("invalid token claims")
+	if claims.TokenUse != TokenUseStream {
+		return nil, errors.New("invalid token use")
 	}
+
+	if claims.CandidateID == "" {
+		return nil, errors.New("missing candidateId")
+	}
+	if claims.SessionID == "" {
+		return nil, errors.New("missing sessionId")
+	}
+	if claims.ScheduleID == "" {
+		return nil, errors.New("missing scheduleId")
+	}
+	if claims.ExamID == "" {
+		return nil, errors.New("missing examId")
+	}
+	if len(claims.StreamTypes) == 0 {
+		return nil, errors.New("missing streamTypes")
+	}
+
+	for _, streamType := range claims.StreamTypes {
+		if streamType != "camera" && streamType != "screen" {
+			return nil, fmt.Errorf("unsupported stream type: %s", streamType)
+		}
+	}
+
 	return claims, nil
+}
+
+func (v *Validator) ValidateMonitor(tokenStr string) (*MonitorClaims, error) {
+	claims := &MonitorClaims{}
+
+	if err := v.parse(tokenStr, claims); err != nil {
+		return nil, err
+	}
+
+	if claims.TokenUse != TokenUseMonitor {
+		return nil, errors.New("invalid token use")
+	}
+
+	if claims.UserID == "" {
+		return nil, errors.New("missing userId")
+	}
+	if claims.ExamID == "" {
+		return nil, errors.New("missing examId")
+	}
+	if len(claims.ScheduleIDs) == 0 {
+		return nil, errors.New("missing scheduleIds")
+	}
+	if !claims.HasMonitorRole() {
+		return nil, errors.New("missing monitor role")
+	}
+
+	return claims, nil
+}
+
+func (v *Validator) parse(tokenStr string, claims jwt.Claims) error {
+	if tokenStr == "" {
+		return errors.New("missing token")
+	}
+
+	token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (any, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return v.secret, nil
+	}, jwt.WithExpirationRequired())
+	if err != nil {
+		return fmt.Errorf("parse token: %w", err)
+	}
+
+	if !token.Valid {
+		return errors.New("invalid token")
+	}
+
+	return nil
 }

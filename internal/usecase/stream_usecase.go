@@ -27,7 +27,7 @@ func NewStreamUseCase(publisher domain.EventPublisher, sessions *cache.SessionRe
 
 func (u *StreamUseCase) NotifyStreamStarted(ctx context.Context, scheduleID, sessionID, participantID, streamID, streamType string) error {
 	startedAt := time.Now().UTC()
-	if err := u.sessions.Register(ctx, scheduleID, participantID, streamType, streamID, startedAt); err != nil {
+	if err := u.sessions.Register(ctx, scheduleID, sessionID, participantID, streamType, streamID, startedAt); err != nil {
 		u.logger.Warn("session register failed - monitor may miss this peer",
 			zap.String("streamId", streamID),
 			zap.Error(err),
@@ -36,7 +36,7 @@ func (u *StreamUseCase) NotifyStreamStarted(ctx context.Context, scheduleID, ses
 
 	event := domain.StreamStartedEvent{
 		EventID:       uuid.NewString(),
-		ScheduleID:        scheduleID,
+		ScheduleID:    scheduleID,
 		SessionID:     sessionID,
 		ParticipantID: participantID,
 		StreamID:      streamID,
@@ -60,7 +60,7 @@ func (u *StreamUseCase) NotifyStreamStarted(ctx context.Context, scheduleID, ses
 func (u *StreamUseCase) PublishFrame(ctx context.Context, scheduleID, sessionID, participantID, streamID, streamType, frameURL string, seq int64) error {
 	// refresh Redis trước để tách độc lập với Kafka
 	// frame tick = peer đang sống -> refresh session dù Kafka có fail hay không
-	if err := u.sessions.Refresh(ctx, scheduleID, participantID, streamType); err != nil {
+	if err := u.sessions.Refresh(ctx, scheduleID, sessionID, participantID, streamType); err != nil {
 		u.logger.Warn("session refresh failed",
 			zap.String("streamId", streamID),
 			zap.Error(err),
@@ -69,7 +69,7 @@ func (u *StreamUseCase) PublishFrame(ctx context.Context, scheduleID, sessionID,
 
 	event := domain.FrameReadyEvent{
 		EventID:       uuid.NewString(),
-		ScheduleID:        scheduleID,
+		ScheduleID:    scheduleID,
 		SessionID:     sessionID,
 		ParticipantID: participantID,
 		StreamID:      streamID,
@@ -100,7 +100,7 @@ func (u *StreamUseCase) PublishFrame(ctx context.Context, scheduleID, sessionID,
 
 func (u *StreamUseCase) NotifyStreamEnded(ctx context.Context, scheduleID, sessionID, participantID, streamID, streamType string, segmentKeys []string, durationSecs int64) error {
 	// peer đóng -> unregister
-	if err := u.sessions.Unregister(ctx, scheduleID, participantID, streamType); err != nil {
+	if err := u.sessions.Unregister(ctx, scheduleID, sessionID, participantID, streamType); err != nil {
 		u.logger.Warn("session unregister failed",
 			zap.String("streamId", streamID),
 			zap.Error(err),
@@ -108,7 +108,7 @@ func (u *StreamUseCase) NotifyStreamEnded(ctx context.Context, scheduleID, sessi
 	}
 	event := domain.StreamEndedEvent{
 		EventID:       uuid.NewString(),
-		ScheduleID:        scheduleID,
+		ScheduleID:    scheduleID,
 		SessionID:     sessionID,
 		ParticipantID: participantID,
 		StreamID:      streamID,

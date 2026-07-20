@@ -59,12 +59,16 @@ func NewSegmentUseCase(
 
 func (u *SegmentUseCase) Upload(ctx context.Context, req SegmentUploadRequest) error {
 	// stream_id must belong to active session of participant
-	session, err := u.sessions.Lookup(ctx, req.ScheduleID, req.ParticipantID, req.StreamType)
+	session, err := u.sessions.Lookup(ctx, req.ScheduleID, req.SessionID, req.ParticipantID, req.StreamType)
 	if err != nil || session == nil {
-		return fmt.Errorf("no active session for participant %s in schedule %s", req.ParticipantID, req.ScheduleID)
+		return fmt.Errorf("no active session for participant %s in schedule %s for session %s", req.ParticipantID, req.ScheduleID, req.SessionID)
 	}
 	if session.StreamID != req.StreamID {
 		return fmt.Errorf("streamId mismatch: expected %s, got %s", session.StreamID, req.StreamID)
+	}
+
+	if session.SessionID != req.SessionID {
+		return fmt.Errorf("sessionId mismatch: expected %s, got %s", session.SessionID, req.SessionID)
 	}
 
 	key, err := u.storage.UploadSegment(ctx, req.ScheduleID, req.SessionID, req.StreamID, req.Seq, req.Data)
@@ -128,7 +132,7 @@ func auditGaps(metas []cache.SegmentMeta) ([]SegmentGap, time.Duration) {
 // for this stream, letting AssemblerUseCase.OnStreamEnded take the fast path
 // instead of waiting out the grace period.
 func (u *SegmentUseCase) MarkComplete(ctx context.Context, req SegmentUploadRequest) error {
-	session, err := u.sessions.Lookup(ctx, req.ScheduleID, req.ParticipantID, req.StreamType)
+	session, err := u.sessions.Lookup(ctx, req.ScheduleID, req.SessionID, req.ParticipantID, req.StreamType)
 	if err != nil || session == nil {
 		return fmt.Errorf("no active session for participant %s in schedule %s", req.ParticipantID, req.ScheduleID)
 	}

@@ -11,8 +11,9 @@ service ExamService {
 
 message ValidateAccessRequest {
     string scheduleId = 1;
-    string participantId = 2;
+    string candidateId = 2;
     string streamType = 3;
+    string examSessionId = 4;
 }
 
 message ValidateAccessResponse {

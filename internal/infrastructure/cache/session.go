@@ -14,7 +14,8 @@ const sessionTTL = 5 * time.Minute
 
 type SessionInfo struct {
 	InstanceID    string    `json:"instanceId"`
-	ScheduleID        string    `json:"scheduleId"`
+	ScheduleID    string    `json:"scheduleId"`
+	SessionID     string    `json:"sessionId"`
 	StreamID      string    `json:"streamId"`
 	ParticipantID string    `json:"participantId"`
 	StreamType    string    `json:"streamType"`
@@ -34,10 +35,11 @@ func NewSessionRegistry(client *redis.Client) *SessionRegistry {
 	}
 }
 
-func (r *SessionRegistry) Register(ctx context.Context, scheduleID, participantID, streamType, streamID string, startedAt time.Time) error {
+func (r *SessionRegistry) Register(ctx context.Context, scheduleID, sessionID, participantID, streamType, streamID string, startedAt time.Time) error {
 	val, err := json.Marshal(SessionInfo{
 		InstanceID:    r.instanceID,
-		ScheduleID:        scheduleID,
+		ScheduleID:    scheduleID,
+		SessionID:     sessionID,
 		StreamID:      streamID,
 		ParticipantID: participantID,
 		StreamType:    streamType,
@@ -47,15 +49,15 @@ func (r *SessionRegistry) Register(ctx context.Context, scheduleID, participantI
 	if err != nil {
 		return fmt.Errorf("streaming session registry marshal: %w", err)
 	}
-	return r.client.Set(ctx, sessionKey(scheduleID, participantID, streamType), val, sessionTTL).Err()
+	return r.client.Set(ctx, sessionKey(scheduleID, sessionID, participantID, streamType), val, sessionTTL).Err()
 }
 
-func (r *SessionRegistry) Unregister(ctx context.Context, scheduleID, participantID, streamType string) error {
-	return r.client.Del(ctx, sessionKey(scheduleID, participantID, streamType)).Err()
+func (r *SessionRegistry) Unregister(ctx context.Context, scheduleID, sessionID, participantID, streamType string) error {
+	return r.client.Del(ctx, sessionKey(scheduleID, sessionID, participantID, streamType)).Err()
 }
 
-func (r *SessionRegistry) Lookup(ctx context.Context, scheduleID, participantID, streamType string) (*SessionInfo, error) {
-	val, err := r.client.Get(ctx, sessionKey(scheduleID, participantID, streamType)).Bytes()
+func (r *SessionRegistry) Lookup(ctx context.Context, scheduleID, sessionID, participantID, streamType string) (*SessionInfo, error) {
+	val, err := r.client.Get(ctx, sessionKey(scheduleID, sessionID, participantID, streamType)).Bytes()
 	if err != nil {
 		return nil, fmt.Errorf("streaming session registry lookup: %w", err)
 	}
@@ -75,8 +77,8 @@ func (r *SessionRegistry) ScanAll(ctx context.Context) ([]SessionInfo, error) {
 	return r.scanByPattern(ctx, "streaming-session:*")
 }
 
-func sessionKey(scheduleID, participantID, streamType string) string {
-	return fmt.Sprintf("streaming-session:%s:%s:%s", scheduleID, participantID, streamType)
+func sessionKey(scheduleID, sessionID, participantID, streamType string) string {
+	return fmt.Sprintf("streaming-session:%s:%s:%s:%s", scheduleID, sessionID, participantID, streamType)
 }
 
 func (r *SessionRegistry) scanByPattern(ctx context.Context, pattern string) ([]SessionInfo, error) {
@@ -111,6 +113,6 @@ func (r *SessionRegistry) scanByPattern(ctx context.Context, pattern string) ([]
 	return infos, nil
 }
 
-func (r *SessionRegistry) Refresh(ctx context.Context, scheduleID, participantID, streamType string) error {
-	return r.client.Expire(ctx, sessionKey(scheduleID, participantID, streamType), sessionTTL).Err()
+func (r *SessionRegistry) Refresh(ctx context.Context, scheduleID, sessionID, participantID, streamType string) error {
+	return r.client.Expire(ctx, sessionKey(scheduleID, sessionID, participantID, streamType), sessionTTL).Err()
 }
