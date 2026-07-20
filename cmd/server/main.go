@@ -36,9 +36,12 @@ func main() {
 	logger, _ := zap.NewProduction()
 	defer logger.Sync()
 
-	err := godotenv.Load()
-	if err != nil {
-		logger.Fatal("error loading env file")
+	// .env is a local-dev convenience only -- in production, env vars come
+	// from the Kubernetes ConfigMap/Secret injected directly into the
+	// container, no .env file exists on disk. Missing file is expected there,
+	// not fatal; only warn so real env vars (already set) still get used.
+	if err := godotenv.Load(); err != nil {
+		logger.Warn("no .env file loaded, using existing environment variables")
 	}
 
 	brokers := os.Getenv("KAFKA_BROKERS")
