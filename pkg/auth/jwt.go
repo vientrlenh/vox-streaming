@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 )
 
 type Role string
@@ -17,8 +18,16 @@ const (
 )
 
 const (
-	TokenUseStream = "stream"
+	TokenUseStream  = "stream"
 	TokenUseMonitor = "monitor"
+)
+
+type MonitorScope string
+
+const (
+	MonitorScopeSchoolAdmin     MonitorScope = "SCHOOL_ADMIN"
+	MonitorScopeExamChair       MonitorScope = "EXAM_CHAIR"
+	MonitorScopeScheduleProctor MonitorScope = "SCHEDULE_PROCTOR"
 )
 
 type StreamClaims struct {
@@ -27,17 +36,18 @@ type StreamClaims struct {
 	ScheduleID  string   `json:"scheduleId"`
 	ExamID      string   `json:"examId"`
 	StreamTypes []string `json:"streamTypes"`
-	TokenUse 	string 	 `json:"tokenUse"`
+	TokenUse    string   `json:"tokenUse"`
 	jwt.RegisteredClaims
 }
 
 type MonitorClaims struct {
-	UserID      string   `json:"userId"`
-	SessionIDs  []string `json:"sessionIds"`
-	ScheduleIDs []string `json:"scheduleIds"`
-	ExamID      string   `json:"examId"`
-	Roles       []string `json:"roles"`
-	TokenUse    string 	 `json:"tokenUse"`
+	UserID       string   `json:"userId"`
+	SchoolID     string   `json:"schoolId"`
+	MonitorScope string   `json:"monitorScope"`
+	ScheduleIDs  []string `json:"scheduleIds"`
+	ExamID       string   `json:"examId"`
+	Roles        []string `json:"roles"`
+	TokenUse     string   `json:"tokenUse"`
 	jwt.RegisteredClaims
 }
 
@@ -53,8 +63,19 @@ func (c *MonitorClaims) HasMonitorRole() bool {
 	return c.hasRole(RoleTeacher) || c.hasRole(RoleSchoolAdmin)
 }
 
+func (c *MonitorClaims) HasValidScopeRole() bool {
+	switch MonitorScope(c.MonitorScope) {
+	case MonitorScopeSchoolAdmin: 
+		return c.hasRole(RoleSchoolAdmin)
+	case MonitorScopeExamChair, MonitorScopeScheduleProctor: 
+		return c.hasRole(RoleTeacher)
+	default: 
+		return false
+	}
+}
+
 func (c *MonitorClaims) CanMonitorSchedule(scheduleID string) bool {
-	if !c.HasMonitorRole() {
+	if !c.HasValidScopeRole() {
 		return false
 	}
 	return slices.Contains(c.ScheduleIDs, scheduleID)
@@ -133,14 +154,55 @@ func (v *Validator) ValidateMonitor(tokenStr string) (*MonitorClaims, error) {
 	if claims.UserID == "" {
 		return nil, errors.New("missing userId")
 	}
+
+	if claims.Subject != claims.UserID {
+		return nil, errors.New("subject and userId mismatch")
+	}
+
+	if claims.SchoolID == "" {
+		return nil, errors.New("missing schoolId")
+	}
+
 	if claims.ExamID == "" {
 		return nil, errors.New("missing examId")
 	}
+
 	if len(claims.ScheduleIDs) == 0 {
 		return nil, errors.New("missing scheduleIds")
 	}
+
+	if claims.ID == "" {
+		return nil, errors.New("missing jti")
+	}
+
 	if !claims.HasMonitorRole() {
 		return nil, errors.New("missing monitor role")
+	}
+
+	if err := validateUUID("userId", claims.UserID); err != nil {
+		return nil, err
+	}
+
+	if err := validateUUID("schoolId", claims.SchoolID); err != nil {
+		return nil, err
+	}
+
+	if err := validateUUID("examId", claims.ExamID); err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]struct{}, len(claims.ScheduleIDs)) 
+
+	for _, scheduleID := range claims.ScheduleIDs {
+		if err := validateUUID("scheduleId", scheduleID); err != nil {
+			return nil, err
+		}
+
+		if _, exists := seen[scheduleID]; exists {
+			return nil, errors.New("duplicate scheduleId")
+		}
+
+		seen[scheduleID] = struct{}{}
 	}
 
 	return claims, nil
@@ -165,5 +227,12 @@ func (v *Validator) parse(tokenStr string, claims jwt.Claims) error {
 		return errors.New("invalid token")
 	}
 
+	return nil
+}
+
+func validateUUID(name , value string) error {
+	if _, err := uuid.Parse(value); err != nil {
+		return fmt.Errorf("invalid %s", name)
+	}
 	return nil
 }

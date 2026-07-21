@@ -12,6 +12,7 @@ import (
 )
 
 type StreamInfo struct {
+	SessionID 	  string 	`json:"sessionId"`
 	ParticipantID string    `json:"participantId"`
 	StreamID      string    `json:"streamId"`
 	StreamType    string    `json:"streamType"`
@@ -70,7 +71,8 @@ func (u *MonitorUseCase) GetScheduleSnapshot(ctx context.Context, scheduleID str
 	}
 	infos := make([]StreamInfo, 0, len(sessions))
 	for _, s := range sessions {
-		infos = append(infos, StreamInfo{
+		infos = append(infos, StreamInfo{ 
+			SessionID: s.SessionID, 
 			ParticipantID: s.ParticipantID,
 			StreamID: s.StreamID, 
 			StreamType: s.StreamType, 
@@ -102,6 +104,7 @@ func (u *MonitorUseCase) GetActiveSchedules(ctx context.Context, allowedSchedule
 			continue
 		}
 		scheduleSession[s.ScheduleID] = append(scheduleSession[s.ScheduleID], StreamInfo{
+			SessionID: s.SessionID, 
 			StreamID: s.StreamID, 
 			ParticipantID: s.ParticipantID, 
 			StreamType: s.StreamType, 

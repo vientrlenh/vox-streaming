@@ -192,6 +192,11 @@ func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if claims.ExpiresAt == nil || !claims.ExpiresAt.After(time.Now()) {
+		http.Error(w, "token expired", http.StatusUnauthorized)
+		return
+	}
+
 	rawConn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.logger.Error("monitor websocket upgrade failed", zap.Error(err))
@@ -200,7 +205,13 @@ func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 	defer rawConn.Close()
 
 	// context riêng để cancel cả 2 subscription khi monitor disconnect
-	ctx, cancel := context.WithCancel(r.Context())
+	
+	if claims.ExpiresAt == nil {
+		http.Error(w, "invalid token expiration", http.StatusUnauthorized)
+		return
+	}
+
+	ctx, cancel := context.WithDeadline(r.Context(), claims.ExpiresAt.Time)
 	defer cancel()
 
 	conn := &safeConn{conn: rawConn}
