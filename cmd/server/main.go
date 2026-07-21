@@ -171,7 +171,7 @@ func main() {
 		time.Duration(assemblyGraceSecs)*time.Second,
 		logger,
 	)
-	segmentHandler := segmenttransport.NewSegmentHandler(segmentUseCase, assemblerUseCase, jwtValidator, logger)
+	segmentHandler := segmenttransport.NewSegmentHandler(segmentUseCase, assemblerUseCase, jwtValidator, sessionRegistry, logger)
 
 	ffmpegIngestOpts := buildFFmpegIngestOptions(logger)
 
@@ -207,8 +207,8 @@ func main() {
 		jwtValidator,
 		broadCaster,
 		examClient,
-		storageClient, 
-		segmentRegistry, 
+		storageClient,
+		segmentRegistry,
 	)
 
 	addr := os.Getenv("WEBRTC_ADDR")
@@ -217,9 +217,9 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	c := cors.New(cors.Options{
-		AllowedOrigins: allowedOrigins, 
-		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"}, 
-		AllowedHeaders: []string{"Content-Type", "Authorization"}, 
+		AllowedOrigins:   allowedOrigins,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-Segment-SHA256"},
 		AllowCredentials: true,
 	})
 	corsHandler := c.Handler(mux)
@@ -495,7 +495,6 @@ func parseAllowedOrigins() []string {
 	}
 	return origins
 }
-
 
 func buildFFmpegIngestOptions(logger *zap.Logger) webrtctransport.FFmpegIngestOptions {
 	rangeStart, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_PORT_RANGE_START"))

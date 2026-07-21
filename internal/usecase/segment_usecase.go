@@ -2,7 +2,9 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
@@ -10,77 +12,103 @@ import (
 	"go.uber.org/zap"
 )
 
+var (
+	ErrUploadSessionNotFound  = cache.ErrUploadSessionNotFound
+	ErrUploadSessionExpired   = cache.ErrUploadSessionExpired
+	ErrUploadSessionCompleted = errors.New("upload session already completed")
+	ErrUploadSessionOwnership = errors.New("upload session ownership mismatch")
+	ErrSegmentConflict        = errors.New("segment sequence already contains different content")
+)
+
 type SegmentUploadRequest struct {
 	StreamID      string
 	ParticipantID string
 	SessionID     string
-	ScheduleID        string
-	StreamType    string
+	ScheduleID    string
+	StreamTypes   []string
 	Seq           int64
 	StartedAt     time.Time
-	EndedAt time.Time
-	Data []byte
+	EndedAt       time.Time
+	SHA256        string
+	Data          []byte
 }
 
 type SegmentGap struct {
 	FromSeq int64
-	ToSeq int64
+	ToSeq   int64
 	Missing time.Duration
 }
 
 type StreamAudit struct {
-	StreamID string
-	TotalSegments int
+	StreamID         string
+	TotalSegments    int
 	RecordedDuration time.Duration
-	Gaps []SegmentGap 
-	HasGaps bool
+	Gaps             []SegmentGap
+	HasGaps          bool
 }
 
 type SegmentUseCase struct {
-	storage *storage.Client
+	storage  *storage.Client
 	segments *cache.SegmentRegistry
 	sessions *cache.SessionRegistry
-	logger *zap.Logger
+	logger   *zap.Logger
 }
 
 func NewSegmentUseCase(
-	storage *storage.Client, 
+	storage *storage.Client,
 	segments *cache.SegmentRegistry,
-	sessions *cache.SessionRegistry, 
+	sessions *cache.SessionRegistry,
 	logger *zap.Logger,
 ) *SegmentUseCase {
 	return &SegmentUseCase{
-		storage: storage, 
-		segments: segments, 
-		sessions: sessions, 
-		logger: logger,
+		storage:  storage,
+		segments: segments,
+		sessions: sessions,
+		logger:   logger,
 	}
 }
 
 func (u *SegmentUseCase) Upload(ctx context.Context, req SegmentUploadRequest) error {
-	// stream_id must belong to active session of participant
-	session, err := u.sessions.Lookup(ctx, req.ScheduleID, req.SessionID, req.ParticipantID, req.StreamType)
-	if err != nil || session == nil {
-		return fmt.Errorf("no active session for participant %s in schedule %s for session %s", req.ParticipantID, req.ScheduleID, req.SessionID)
+	session, err := u.sessions.LookupUpload(ctx, req.StreamID)
+	if err != nil {
+		return err
 	}
-	if session.StreamID != req.StreamID {
-		return fmt.Errorf("streamId mismatch: expected %s, got %s", session.StreamID, req.StreamID)
+	if err := validateUploadOwnership(session, req); err != nil {
+		return err
 	}
-
-	if session.SessionID != req.SessionID {
-		return fmt.Errorf("sessionId mismatch: expected %s, got %s", session.SessionID, req.SessionID)
+	if session.Completed {
+		return ErrUploadSessionCompleted
 	}
 
-	key, err := u.storage.UploadSegment(ctx, req.ScheduleID, req.SessionID, req.StreamID, req.Seq, req.Data)
+	existing, err := u.segments.Get(ctx, req.StreamID, req.Seq)
+	if err != nil {
+		return fmt.Errorf("lookup existing segment: %w", err)
+	}
+	if existing != nil {
+		if existing.SHA256 == req.SHA256 {
+			return nil
+		}
+		return ErrSegmentConflict
+	}
+
+	key, err := u.storage.UploadSegment(
+		ctx,
+		session.ScheduleID,
+		session.SessionID,
+		session.StreamID,
+		req.Seq,
+		req.Data,
+	)
 	if err != nil {
 		return fmt.Errorf("upload segment: %w", err)
 	}
 	return u.segments.Add(ctx, req.StreamID, cache.SegmentMeta{
-		Seq: req.Seq, 
-		S3Key: key, 
-		StartedAt: req.StartedAt,
-		EndedAt: req.EndedAt,
-		SizeBytes: int64(len(req.Data)),
+		Seq:        req.Seq,
+		S3Key:      key,
+		SHA256:     req.SHA256,
+		StartedAt:  req.StartedAt,
+		EndedAt:    req.EndedAt,
+		SizeBytes:  int64(len(req.Data)),
 		UploadedAt: time.Now().UTC(),
 	})
 }
@@ -91,7 +119,7 @@ func (u *SegmentUseCase) Audit(ctx context.Context, streamID string) (*StreamAud
 		return nil, err
 	}
 	audit := &StreamAudit{
-		StreamID: streamID,
+		StreamID:      streamID,
 		TotalSegments: len(metas),
 	}
 	if len(metas) == 0 {
@@ -131,13 +159,33 @@ func auditGaps(metas []cache.SegmentMeta) ([]SegmentGap, time.Duration) {
 // MarkComplete records that the client has finished uploading all segments
 // for this stream, letting AssemblerUseCase.OnStreamEnded take the fast path
 // instead of waiting out the grace period.
-func (u *SegmentUseCase) MarkComplete(ctx context.Context, req SegmentUploadRequest) error {
-	session, err := u.sessions.Lookup(ctx, req.ScheduleID, req.SessionID, req.ParticipantID, req.StreamType)
-	if err != nil || session == nil {
-		return fmt.Errorf("no active session for participant %s in schedule %s", req.ParticipantID, req.ScheduleID)
+func (u *SegmentUseCase) MarkComplete(ctx context.Context, req SegmentUploadRequest) (*cache.UploadSession, bool, error) {
+	session, err := u.sessions.LookupUpload(ctx, req.StreamID)
+	if err != nil {
+		return nil, false, err
 	}
-	if session.StreamID != req.StreamID {
-		return fmt.Errorf("streamId mismatch: expected %s, got %s", session.StreamID, req.StreamID)
+	if err := validateUploadOwnership(session, req); err != nil {
+		return nil, false, err
 	}
-	return u.segments.MarkComplete(ctx, req.StreamID)
+
+	newlyCompleted, err := u.sessions.MarkUploadComplete(ctx, req.StreamID)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := u.segments.MarkComplete(ctx, req.StreamID); err != nil {
+		return nil, false, fmt.Errorf("mark segment stream complete: %w", err)
+	}
+
+	return session, newlyCompleted, nil
+}
+
+func validateUploadOwnership(session *cache.UploadSession, req SegmentUploadRequest) error {
+	if session.StreamID != req.StreamID ||
+		session.CandidateID != req.ParticipantID ||
+		session.SessionID != req.SessionID ||
+		session.ScheduleID != req.ScheduleID ||
+		!slices.Contains(req.StreamTypes, session.StreamType) {
+		return ErrUploadSessionOwnership
+	}
+	return nil
 }
