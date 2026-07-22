@@ -125,14 +125,15 @@ var (
 )
 
 type UploadSession struct {
-	StreamID    string    `json:"streamId"`
-	CandidateID string    `json:"candidateId"`
-	SessionID   string    `json:"sessionId"`
-	ScheduleID  string    `json:"scheduleId"`
-	StreamType  string    `json:"streamType"`
-	CreatedAt   time.Time `json:"createdAt"`
-	ExpiresAt   time.Time `json:"expiresAt"`
-	Completed   bool      `json:"completed"`
+	StreamID        string    `json:"streamId"`
+	CandidateID     string    `json:"candidateId"`
+	SessionID       string    `json:"sessionId"`
+	ScheduleID      string    `json:"scheduleId"`
+	StreamType      string    `json:"streamType"`
+	CreatedAt       time.Time `json:"createdAt"`
+	ExpiresAt       time.Time `json:"expiresAt"`
+	Completed       bool      `json:"completed"`
+	UploadTokenHash string    `json:"uploadTokenHash"`
 }
 
 func uploadSessionKey(streamID string) string {
@@ -156,7 +157,13 @@ if existingKey then
   if existing then
     local existingSession = cjson.decode(existing)
     if not existingSession.completed then
-      return existing
+	  local replacement = cjson.decode(ARGV[1])
+	  existingSession.uploadTokenHash = replacement.uploadTokenHash
+	  existingSession.expiresAt = replacement.expiresAt
+	  local refreshed = cjson.encode(existingSession)
+	  redis.call("SET", existingKey, refreshed, "PX", ARGV[2])
+	  redis.call("SET", KEYS[1], existingKey, "PX", ARGV[2])
+	  return refreshed
     end
   end
   redis.call("DEL", KEYS[1])

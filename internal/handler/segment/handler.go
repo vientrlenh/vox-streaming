@@ -1,8 +1,9 @@
 package segment
 
 import (
-	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/transport/api"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
@@ -29,16 +31,16 @@ const (
 
 type SegmentHandler struct {
 	useCase         *usecase.SegmentUseCase
-	assembler       *usecase.AssemblerUseCase
+	publisher       domain.EventPublisher
 	validator       *auth.Validator
 	sessionRegistry *cache.SessionRegistry
 	logger          *zap.Logger
 }
 
-func NewSegmentHandler(uc *usecase.SegmentUseCase, assembler *usecase.AssemblerUseCase, v *auth.Validator, sr *cache.SessionRegistry, logger *zap.Logger) *SegmentHandler {
+func NewSegmentHandler(uc *usecase.SegmentUseCase, publisher domain.EventPublisher, v *auth.Validator, sr *cache.SessionRegistry, logger *zap.Logger) *SegmentHandler {
 	return &SegmentHandler{
 		useCase:         uc,
-		assembler:       assembler,
+		publisher:       publisher,
 		validator:       v,
 		sessionRegistry: sr,
 		logger:          logger,
@@ -48,7 +50,7 @@ func NewSegmentHandler(uc *usecase.SegmentUseCase, assembler *usecase.AssemblerU
 // Upload handles PUT /stream/sessions/{streamId}/segments/{seq}.
 // The body must contain one MP4 segment.
 func (h *SegmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
-	claims, err := h.validateStreamToken(r)
+	uploadToken, err := bearerToken(r)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -127,16 +129,13 @@ func (h *SegmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req := usecase.SegmentUploadRequest{
-		StreamID:      streamID,
-		ParticipantID: claims.CandidateID,
-		SessionID:     claims.SessionID,
-		ScheduleID:    claims.ScheduleID,
-		StreamTypes:   claims.StreamTypes,
-		Seq:           seq,
-		StartedAt:     startedAt,
-		EndedAt:       endedAt,
-		SHA256:        checksum,
-		Data:          data,
+		StreamID:    streamID,
+		UploadToken: uploadToken,
+		Seq:         seq,
+		StartedAt:   startedAt,
+		EndedAt:     endedAt,
+		SHA256:      checksum,
+		Data:        data,
 	}
 
 	if err := h.useCase.Upload(r.Context(), req); err != nil {
@@ -160,7 +159,7 @@ func (h *SegmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 // Complete handles POST /stream/sessions/{streamId}/complete.
 func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
-	claims, err := h.validateStreamToken(r)
+	uploadToken, err := bearerToken(r)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -173,11 +172,8 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req := usecase.SegmentUploadRequest{
-		StreamID:      streamID,
-		ParticipantID: claims.CandidateID,
-		SessionID:     claims.SessionID,
-		ScheduleID:    claims.ScheduleID,
-		StreamTypes:   claims.StreamTypes,
+		StreamID:    streamID,
+		UploadToken: uploadToken,
 	}
 	session, newlyCompleted, err := h.useCase.MarkComplete(r.Context(), req)
 	if err != nil {
@@ -194,22 +190,22 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 		zap.Bool("newlyCompleted", newlyCompleted),
 	)
 
-	// Assembly can take a while (download + ffmpeg + upload) - don't block the
-	// response on it. r.Context() is cancelled once we return, so use a fresh
-	// background context for the detached work.
-	go func() {
-		if err := h.assembler.Assemble(
-			context.Background(),
-			session.ScheduleID,
-			session.SessionID,
-			session.StreamID,
-		); err != nil {
-			h.logger.Error("assembly after completion failed",
-				zap.String("streamId", streamID),
-				zap.Error(err),
-			)
-		}
-	}()
+	eventID, idErr := uuid.NewV7()
+	if idErr != nil {
+		http.Error(w, "cannot create assembly event id", http.StatusInternalServerError)
+		return
+	}
+	// Publish on every idempotent completion call. If Kafka was unavailable after
+	// the first state transition, a client retry can still enqueue the durable job.
+	if err := h.publisher.PublishRecordingAssemblyRequested(r.Context(), domain.RecordingAssemblyRequestedEvent{
+		EventID: eventID.String(), StreamID: session.StreamID, ScheduleID: session.ScheduleID,
+		SessionID: session.SessionID, ParticipantID: session.CandidateID,
+		StreamType: session.StreamType, Source: "DESKTOP_SEGMENT_UPLOAD", RequestedAt: time.Now().UTC(),
+	}); err != nil {
+		h.logger.Error("publish recording assembly request failed", zap.String("streamId", streamID), zap.Error(err))
+		http.Error(w, "cannot queue recording assembly", http.StatusServiceUnavailable)
+		return
+	}
 	api.WriteNoContent(w)
 }
 
@@ -218,14 +214,19 @@ type CreateSessionRequest struct {
 }
 
 type CreateSessionResponse struct {
-	StreamID   string    `json:"streamId"`
-	StreamType string    `json:"streamType"`
-	ExpiresAt  time.Time `json:"expiresAt"`
+	StreamID    string    `json:"streamId"`
+	StreamType  string    `json:"streamType"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+	UploadToken string    `json:"uploadToken"`
 }
 
 func (h *SegmentHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	claims, err := h.validateStreamToken(r)
 	if err != nil {
+		// Was silent before -- a bad/expired/wrong-secret JWT produced a bare 401 with nothing in
+		// the server's own log, which is exactly the failure mode that's hardest to diagnose from
+		// the client side alone (client just sees "401 Unauthorized", no reason why).
+		h.logger.Warn("create upload session: stream token rejected", zap.Error(err))
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -259,16 +260,24 @@ func (h *SegmentHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expiresAt := claims.ExpiresAt.Time.UTC()
+	// The short-lived upload credential keeps retries possible after the stream
+	// JWT expires, without extending permission to open new recording streams.
+	expiresAt := claims.ExpiresAt.Time.UTC().Add(30 * time.Minute)
+	uploadToken, uploadTokenHash, err := newUploadToken()
+	if err != nil {
+		http.Error(w, "cannot create upload credential", http.StatusInternalServerError)
+		return
+	}
 
 	session := cache.UploadSession{
-		StreamID:    streamID.String(),
-		CandidateID: claims.CandidateID,
-		SessionID:   claims.SessionID,
-		ScheduleID:  claims.ScheduleID,
-		StreamType:  body.StreamType,
-		CreatedAt:   time.Now().UTC(),
-		ExpiresAt:   expiresAt,
+		StreamID:        streamID.String(),
+		CandidateID:     claims.CandidateID,
+		SessionID:       claims.SessionID,
+		ScheduleID:      claims.ScheduleID,
+		StreamType:      body.StreamType,
+		CreatedAt:       time.Now().UTC(),
+		ExpiresAt:       expiresAt,
+		UploadTokenHash: uploadTokenHash,
 	}
 
 	registered, created, err := h.sessionRegistry.RegisterOrGetUpload(r.Context(), session)
@@ -287,13 +296,48 @@ func (h *SegmentHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	if created {
 		status = http.StatusCreated
 	}
+	stateEventID, idErr := uuid.NewV7()
+	if idErr != nil {
+		http.Error(w, "cannot create recording state event id", http.StatusInternalServerError)
+		return
+	}
+	if err := h.publisher.PublishRecordingPartChanged(r.Context(), domain.RecordingPartChangedEvent{
+		EventID: stateEventID.String(), StreamID: registered.StreamID,
+		ScheduleID: registered.ScheduleID, SessionID: registered.SessionID,
+		ParticipantID: registered.CandidateID, StreamType: registered.StreamType,
+		Source: "DESKTOP_SEGMENT_UPLOAD", Status: "UPLOADING", OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		h.logger.Error("publish initial recording state failed", zap.String("streamId", registered.StreamID), zap.Error(err))
+		http.Error(w, "cannot publish recording state", http.StatusServiceUnavailable)
+		return
+	}
 	if err := api.WriteJSON(w, status, CreateSessionResponse{
-		StreamID:   registered.StreamID,
-		StreamType: registered.StreamType,
-		ExpiresAt:  registered.ExpiresAt,
+		StreamID:    registered.StreamID,
+		StreamType:  registered.StreamType,
+		ExpiresAt:   registered.ExpiresAt,
+		UploadToken: uploadToken,
 	}); err != nil {
 		h.logger.Warn("write create upload session response failed", zap.Error(err))
 	}
+}
+
+func bearerToken(r *http.Request) (string, error) {
+	authorization := r.Header.Get("Authorization")
+	token, found := strings.CutPrefix(authorization, "Bearer ")
+	if !found || strings.TrimSpace(token) == "" {
+		return "", errors.New("missing bearer token")
+	}
+	return strings.TrimSpace(token), nil
+}
+
+func newUploadToken() (string, string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", "", err
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+	hash := sha256.Sum256([]byte(token))
+	return token, hex.EncodeToString(hash[:]), nil
 }
 
 func (h *SegmentHandler) validateStreamToken(r *http.Request) (*auth.StreamClaims, error) {

@@ -44,16 +44,28 @@ var RequiredTopics = []TopicSpec{
 		RetentionMS:       86400000,
 	},
 	{
+		Name:              domain.TopicRecordingAssemblyRequested,
+		NumPartitions:     4,
+		ReplicationFactor: 1,
+		RetentionMS:       604800000,
+	},
+	{
+		Name:              domain.TopicRecordingPartChanged,
+		NumPartitions:     4,
+		ReplicationFactor: 1,
+		RetentionMS:       604800000,
+	},
+	{
 		Name:              domain.TopicScheduleClosed,
 		NumPartitions:     2,
 		ReplicationFactor: 1,
 		RetentionMS:       3600000,
 	},
 	{
-		Name: domain.TopicAlertRaised, 
-		NumPartitions: 6,
+		Name:              domain.TopicAlertRaised,
+		NumPartitions:     6,
 		ReplicationFactor: 1,
-		RetentionMS: 604800000, // 7 days
+		RetentionMS:       604800000, // 7 days
 	},
 }
 
@@ -143,7 +155,6 @@ func WaitForKafka(ctx context.Context, cfg Config, brokers []string, logger *zap
 	}
 }
 
-
 // PingKafka dials the first broker to verify Kafka is reachable.
 func PingKafka(ctx context.Context, cfg Config, brokers []string) error {
 	if len(brokers) == 0 {
@@ -166,8 +177,8 @@ func dialer(cfg Config) *kafka.Dialer {
 	if cfg.TLSEnabled && cfg.SASLUser != "" && cfg.SASLPass != "" {
 		mechanism, _ := scram.Mechanism(scram.SHA256, cfg.SASLUser, cfg.SASLPass)
 		dialer = &kafka.Dialer{
-			SASLMechanism: mechanism, 
-			TLS: &tls.Config{},
+			SASLMechanism: mechanism,
+			TLS:           &tls.Config{},
 		}
 	}
 	return dialer

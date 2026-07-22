@@ -3,6 +3,7 @@ package usecase
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,29 +13,34 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
-	examgrpc "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
 	"github.com/vientrlenh/vox-streaming/internal/util"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
 type AssemblerUseCase struct {
-	storage *storage.Client
-	examClient *examgrpc.ExamClient
-	segments *cache.SegmentRegistry
+	storage     *storage.Client
+	segments    *cache.SegmentRegistry
+	sessions    *cache.SessionRegistry
+	publisher   domain.EventPublisher
 	gracePeriod time.Duration
-	logger *zap.Logger
-	workDir string
-	sem chan struct{}
-	inFlight sync.Map // streamID -> struct{}, guards against completion+timeout racing on the same jobDir
+	logger      *zap.Logger
+	workDir     string
+	sem         chan struct{}
+	inFlight    sync.Map // streamID -> struct{}, guards against completion+timeout racing on the same jobDir
 }
+
+var errRecordingStatePublish = errors.New("publish recording state")
 
 func NewAssemblerUseCase(
 	storage *storage.Client,
-	examClient *examgrpc.ExamClient,
 	segments *cache.SegmentRegistry,
+	sessions *cache.SessionRegistry,
+	publisher domain.EventPublisher,
 	gracePeriod time.Duration,
 	logger *zap.Logger,
 ) *AssemblerUseCase {
@@ -44,13 +50,14 @@ func NewAssemblerUseCase(
 	}
 	maxConcurrent := 3
 	return &AssemblerUseCase{
-		storage: storage,
-		examClient: examClient,
-		segments: segments,
+		storage:     storage,
+		segments:    segments,
+		sessions:    sessions,
+		publisher:   publisher,
 		gracePeriod: gracePeriod,
-		logger: logger,
-		workDir: workDir,
-		sem: make(chan struct{}, maxConcurrent),
+		logger:      logger,
+		workDir:     workDir,
+		sem:         make(chan struct{}, maxConcurrent),
 	}
 }
 
@@ -59,19 +66,19 @@ func NewAssemblerUseCase(
 // grace period — the Kafka consumer this feeds is a single sequential
 // goroutine, and blocking it would queue up every other student's
 // stream.ended behind this one.
-func (u *AssemblerUseCase) OnStreamEnded(ctx context.Context, scheduleID, sessionID, streamID string) error {
-	complete, err := u.segments.IsComplete(ctx, streamID)
+func (u *AssemblerUseCase) OnStreamEnded(ctx context.Context, event domain.StreamEndedEvent) error {
+	complete, err := u.segments.IsComplete(ctx, event.StreamID)
 	if err != nil {
 		return err // infra error - let Kafka retry
 	}
 	if complete {
-		return u.Assemble(ctx, scheduleID, sessionID, streamID) // fast path, still covered by Kafka retry
+		return u.AssembleRequested(ctx, recordingRequestFromStreamEnded(event))
 	}
 
 	time.AfterFunc(u.gracePeriod, func() {
-		if err := u.Assemble(context.Background(), scheduleID, sessionID, streamID); err != nil {
+		if err := u.AssembleRequested(context.Background(), recordingRequestFromStreamEnded(event)); err != nil {
 			u.logger.Error("fallback assembly failed",
-				zap.String("streamId", streamID),
+				zap.String("streamId", event.StreamID),
 				zap.Error(err),
 			)
 		}
@@ -80,6 +87,35 @@ func (u *AssemblerUseCase) OnStreamEnded(ctx context.Context, scheduleID, sessio
 }
 
 func (u *AssemblerUseCase) Assemble(ctx context.Context, scheduleID, sessionID, streamID string) error {
+	session, _ := u.sessions.LookupUpload(ctx, streamID)
+	event := domain.RecordingAssemblyRequestedEvent{
+		StreamID: streamID, ScheduleID: scheduleID, SessionID: sessionID,
+		Source: "DESKTOP_SEGMENT_UPLOAD", RequestedAt: time.Now().UTC(),
+	}
+	if session != nil {
+		event.ParticipantID = session.CandidateID
+		event.StreamType = session.StreamType
+	}
+	return u.AssembleRequested(ctx, event)
+}
+
+func (u *AssemblerUseCase) AssembleRequested(ctx context.Context, event domain.RecordingAssemblyRequestedEvent) error {
+	err := u.assemble(ctx, event)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errRecordingStatePublish) {
+		return err
+	}
+	publishErr := u.publishRecordingState(ctx, event, "FAILED", "", 0, false, err.Error())
+	if publishErr != nil {
+		return fmt.Errorf("assemble recording: %v; publish failure state: %w", err, publishErr)
+	}
+	return err
+}
+
+func (u *AssemblerUseCase) assemble(ctx context.Context, event domain.RecordingAssemblyRequestedEvent) error {
+	scheduleID, sessionID, streamID := event.ScheduleID, event.SessionID, event.StreamID
 	if _, alreadyRunning := u.inFlight.LoadOrStore(streamID, struct{}{}); alreadyRunning {
 		return nil // completion and timeout triggers raced - the other one owns this jobDir
 	}
@@ -90,12 +126,11 @@ func (u *AssemblerUseCase) Assemble(ctx context.Context, scheduleID, sessionID, 
 		return fmt.Errorf("list segments: %w", err)
 	}
 	if len(metas) == 0 {
-		u.logger.Debug("no segments uploaded, skipping assembly", zap.String("streamId", streamID))
-		return nil
+		return fmt.Errorf("no segments uploaded for stream %s", streamID)
 	}
 
 	select {
-	case u.sem <-struct{}{}:
+	case u.sem <- struct{}{}:
 		defer func() { <-u.sem }()
 	case <-ctx.Done():
 		return ctx.Err()
@@ -113,11 +148,16 @@ func (u *AssemblerUseCase) Assemble(ctx context.Context, scheduleID, sessionID, 
 		return fmt.Errorf("check existing recording: %w", err)
 	}
 	if exists {
-		log.Info("recording already assembled, skipping")
+		durationSecs, hasGaps := recordingSummary(metas)
+		if err := u.publishRecordingState(ctx, event, recordingStatus(hasGaps), storage.FinalRecordingKey(scheduleID, sessionID, streamID), durationSecs, hasGaps, ""); err != nil {
+			return fmt.Errorf("%w: %v", errRecordingStatePublish, err)
+		}
+		log.Info("recording already assembled; state republished")
 		return nil
 	}
 
-	if gaps, _ := auditGaps(metas); len(gaps) > 0 {
+	gaps, _ := auditGaps(metas)
+	if len(gaps) > 0 {
 		log.Warn("segment gaps detected, assembling best-effort anyway", zap.Int("gapCount", len(gaps)))
 	}
 
@@ -127,7 +167,7 @@ func (u *AssemblerUseCase) Assemble(ctx context.Context, scheduleID, sessionID, 
 	}
 	defer os.RemoveAll(jobDir) // cleanup for both fail and success
 
-	estimatedBytes := uint64(len(metas)) * 20*1024*1024 * 2 // 20MB x 2 for output
+	estimatedBytes := uint64(len(metas)) * 20 * 1024 * 1024 * 2 // 20MB x 2 for output
 	if err := u.checkDiskSpace(u.workDir, estimatedBytes); err != nil {
 		return fmt.Errorf("pre-flight disk check: %w", err)
 	}
@@ -175,13 +215,47 @@ func (u *AssemblerUseCase) Assemble(ctx context.Context, scheduleID, sessionID, 
 		return fmt.Errorf("upload final recording: %w", err)
 	}
 
-	durationSecs := int64(metas[len(metas)-1].EndedAt.Sub(metas[0].StartedAt).Seconds())
-	if err := u.examClient.UpdateRecording(ctx, streamID, scheduleID, recordingKey, durationSecs); err != nil {
-		return fmt.Errorf("notify exam service: %w", err)
+	durationSecs, hasGaps := recordingSummary(metas)
+	if err := u.publishRecordingState(ctx, event, recordingStatus(hasGaps), recordingKey, durationSecs, hasGaps, ""); err != nil {
+		return fmt.Errorf("%w: %v", errRecordingStatePublish, err)
 	}
 
 	log.Info("assembly completed", zap.String("recordingKey", recordingKey))
 	return nil
+}
+
+func recordingSummary(metas []cache.SegmentMeta) (int64, bool) {
+	gaps, _ := auditGaps(metas)
+	return int64(metas[len(metas)-1].EndedAt.Sub(metas[0].StartedAt).Seconds()), len(gaps) > 0
+}
+
+func recordingStatus(hasGaps bool) string {
+	if hasGaps {
+		return "PARTIAL"
+	}
+	return "READY"
+}
+
+func (u *AssemblerUseCase) publishRecordingState(ctx context.Context, request domain.RecordingAssemblyRequestedEvent, status, objectKey string, durationSecs int64, hasGaps bool, errorMessage string) error {
+	eventID, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+	return u.publisher.PublishRecordingPartChanged(ctx, domain.RecordingPartChangedEvent{
+		EventID: eventID.String(), StreamID: request.StreamID, ScheduleID: request.ScheduleID,
+		SessionID: request.SessionID, ParticipantID: request.ParticipantID,
+		StreamType: request.StreamType, Source: request.Source, Status: status,
+		ObjectKey: objectKey, DurationSecs: durationSecs, HasGaps: hasGaps,
+		ErrorMessage: errorMessage, OccurredAt: time.Now().UTC(),
+	})
+}
+
+func recordingRequestFromStreamEnded(event domain.StreamEndedEvent) domain.RecordingAssemblyRequestedEvent {
+	return domain.RecordingAssemblyRequestedEvent{
+		EventID: event.EventID, StreamID: event.StreamID, ScheduleID: event.ScheduleID,
+		SessionID: event.SessionID, ParticipantID: event.ParticipantID,
+		StreamType: event.StreamType, Source: "SERVER_WEBRTC", RequestedAt: event.EndedAt,
+	}
 }
 
 func (u *AssemblerUseCase) downloadSegments(ctx context.Context, keys []string, dir string) error {
@@ -190,7 +264,7 @@ func (u *AssemblerUseCase) downloadSegments(ctx context.Context, keys []string, 
 
 	for i, key := range keys {
 		g.Go(func() error {
-			sem <-struct{}{}
+			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			dstPath := filepath.Join(dir, fmt.Sprintf("%04d.mp4", i))
@@ -202,12 +276,12 @@ func (u *AssemblerUseCase) downloadSegments(ctx context.Context, keys []string, 
 
 func (u *AssemblerUseCase) concat(ctx context.Context, concatPath, outputPath string) error {
 	var errBuf bytes.Buffer
-	cmd := exec.CommandContext(ctx, "ffmpeg", 
-		"-hide_banner", "-loglevel", "error", 
-		"-f", "concat", "-safe", "0", 
-		"-i", concatPath, 
-		"-c", "copy", 
-		"-movflags", "faststart", 
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-f", "concat", "-safe", "0",
+		"-i", concatPath,
+		"-c", "copy",
+		"-movflags", "faststart",
 		"-y", outputPath,
 	)
 	cmd.Stderr = &errBuf

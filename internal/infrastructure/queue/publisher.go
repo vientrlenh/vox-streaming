@@ -23,7 +23,9 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 		domain.TopicFrameReady,
 		domain.TopicStreamStarted,
 		domain.TopicStreamEnded,
-		domain.TopicScheduleClosed, 
+		domain.TopicRecordingAssemblyRequested,
+		domain.TopicRecordingPartChanged,
+		domain.TopicScheduleClosed,
 		domain.TopicAlertRaised,
 	}
 
@@ -98,6 +100,14 @@ func (p *Publisher) PublishScheduleClosed(ctx context.Context, event domain.Sche
 	return p.publish(ctx, domain.TopicScheduleClosed, event.ScheduleID, event)
 }
 
+func (p *Publisher) PublishRecordingAssemblyRequested(ctx context.Context, event domain.RecordingAssemblyRequestedEvent) error {
+	return p.publish(ctx, domain.TopicRecordingAssemblyRequested, event.StreamID, event)
+}
+
+func (p *Publisher) PublishRecordingPartChanged(ctx context.Context, event domain.RecordingPartChangedEvent) error {
+	return p.publish(ctx, domain.TopicRecordingPartChanged, event.StreamID, event)
+}
+
 func (p *Publisher) PublishAlertRaised(ctx context.Context, event domain.AlertRaisedEvent) error {
 	return p.publish(ctx, domain.TopicAlertRaised, event.ScheduleID, event)
 }
@@ -113,13 +123,19 @@ func (p *Publisher) publish(ctx context.Context, topic, key string, payload any)
 		return fmt.Errorf("kafka publish: no writer for topic %q", topic)
 	}
 
+	headers := []kafka.Header{
+		{Key: "content-type", Value: []byte("application/json")},
+		{Key: "produced-at", Value: []byte(time.Now().UTC().Format(time.RFC3339))},
+	}
+	if topic == domain.TopicRecordingPartChanged {
+		// Spring's JSON consumer uses this standard type header to deserialize
+		// events produced by kafka-go into a generic map.
+		headers = append(headers, kafka.Header{Key: "__TypeId__", Value: []byte("java.util.LinkedHashMap")})
+	}
 	msg := kafka.Message{
-		Key:   []byte(key),
-		Value: data,
-		Headers: []kafka.Header{
-			{Key: "content-type", Value: []byte("application/json")},
-			{Key: "produced-at", Value: []byte(time.Now().UTC().Format(time.RFC3339))},
-		},
+		Key:     []byte(key),
+		Value:   data,
+		Headers: headers,
 	}
 
 	start := time.Now()

@@ -2,9 +2,11 @@ package usecase
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
@@ -21,16 +23,13 @@ var (
 )
 
 type SegmentUploadRequest struct {
-	StreamID      string
-	ParticipantID string
-	SessionID     string
-	ScheduleID    string
-	StreamTypes   []string
-	Seq           int64
-	StartedAt     time.Time
-	EndedAt       time.Time
-	SHA256        string
-	Data          []byte
+	StreamID    string
+	UploadToken string
+	Seq         int64
+	StartedAt   time.Time
+	EndedAt     time.Time
+	SHA256      string
+	Data        []byte
 }
 
 type SegmentGap struct {
@@ -180,11 +179,10 @@ func (u *SegmentUseCase) MarkComplete(ctx context.Context, req SegmentUploadRequ
 }
 
 func validateUploadOwnership(session *cache.UploadSession, req SegmentUploadRequest) error {
-	if session.StreamID != req.StreamID ||
-		session.CandidateID != req.ParticipantID ||
-		session.SessionID != req.SessionID ||
-		session.ScheduleID != req.ScheduleID ||
-		!slices.Contains(req.StreamTypes, session.StreamType) {
+	actual := sha256.Sum256([]byte(req.UploadToken))
+	expected, err := hex.DecodeString(session.UploadTokenHash)
+	if err != nil || session.StreamID != req.StreamID || len(expected) != len(actual) ||
+		subtle.ConstantTimeCompare(expected, actual[:]) != 1 {
 		return ErrUploadSessionOwnership
 	}
 	return nil

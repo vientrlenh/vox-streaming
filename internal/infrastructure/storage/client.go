@@ -19,18 +19,18 @@ import (
 )
 
 type Client struct {
-	s3 *s3.Client
+	s3      *s3.Client
 	presign *s3.PresignClient
-	cfg Config
-	logger *zap.Logger
+	cfg     Config
+	logger  *zap.Logger
 }
 
 func NewClient(cfg Config, logger *zap.Logger) (*Client, error) {
 	resolver := credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, "")
 
 	awsCfg, err := awscfg.LoadDefaultConfig(
-		context.Background(), 
-		awscfg.WithRegion(cfg.Region), 
+		context.Background(),
+		awscfg.WithRegion(cfg.Region),
 		awscfg.WithCredentialsProvider(resolver),
 	)
 	if err != nil {
@@ -50,16 +50,16 @@ func NewClient(cfg Config, logger *zap.Logger) (*Client, error) {
 	})
 
 	return &Client{
-		s3: s3Client, 
+		s3:      s3Client,
 		presign: s3.NewPresignClient(s3Client),
-		cfg: cfg, 
-		logger: logger,
+		cfg:     cfg,
+		logger:  logger,
 	}, nil
 }
 
 func (c *Client) EnsureBuckets(ctx context.Context) error {
 	specs := []struct {
-		bucket string
+		bucket        string
 		retentionDays int32
 	}{
 		{c.cfg.FrameBucket, 7},
@@ -112,8 +112,8 @@ func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays 
 		Bucket: aws.String(bucket),
 		LifecycleConfiguration: &types.BucketLifecycleConfiguration{
 			Rules: []types.LifecycleRule{{
-				ID: aws.String("auto-expire"),
-				Status: types.ExpirationStatusEnabled, 
+				ID:     aws.String("auto-expire"),
+				Status: types.ExpirationStatusEnabled,
 				Filter: &types.LifecycleRuleFilter{
 					Prefix: aws.String(""),
 				},
@@ -124,7 +124,7 @@ func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays 
 		},
 	})
 	if err != nil {
-		c.logger.Warn("set lifecycle failed", 
+		c.logger.Warn("set lifecycle failed",
 			zap.String("bucket", bucket),
 			zap.Error(err),
 		)
@@ -135,9 +135,9 @@ func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays 
 func (c *Client) UploadFrame(ctx context.Context, scheduleID, streamID string, seq int64, frameData []byte) (string, error) {
 	key := frameKey(scheduleID, streamID, seq)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(c.cfg.FrameBucket),
-		Key: aws.String(key), 
-		Body: bytes.NewReader(frameData),
+		Bucket:      aws.String(c.cfg.FrameBucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(frameData),
 		ContentType: aws.String("video/h264"),
 	})
 	if err != nil {
@@ -148,8 +148,8 @@ func (c *Client) UploadFrame(ctx context.Context, scheduleID, streamID string, s
 
 func (c *Client) PresignFrame(ctx context.Context, key string, expiry time.Duration) (string, error) {
 	req, err := c.presign.PresignGetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(c.cfg.FrameBucket), 
-		Key: aws.String(key),
+		Bucket: aws.String(c.cfg.FrameBucket),
+		Key:    aws.String(key),
 	}, s3.WithPresignExpires(expiry))
 	if err != nil {
 		return "", fmt.Errorf("presign frame: %w", err)
@@ -159,8 +159,8 @@ func (c *Client) PresignFrame(ctx context.Context, key string, expiry time.Durat
 
 func (c *Client) PresignRecording(ctx context.Context, key string, expiry time.Duration) (string, error) {
 	req, err := c.presign.PresignGetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(c.cfg.RecordingBucket), 
-		Key: aws.String(key),
+		Bucket: aws.String(c.cfg.RecordingBucket),
+		Key:    aws.String(key),
 	}, s3.WithPresignExpires(expiry))
 	if err != nil {
 		return "", fmt.Errorf("presign recording: %w", err)
@@ -168,12 +168,10 @@ func (c *Client) PresignRecording(ctx context.Context, key string, expiry time.D
 	return req.URL, nil
 }
 
-
 // schedules/{scheduleID}/streams/{streamID}/{seq:010d}.264
 func frameKey(scheduleID, streamID string, seq int64) string {
 	return fmt.Sprintf("schedules/%s/streams/%s/%010d.264", scheduleID, streamID, seq)
 }
-
 
 func (c *Client) PresignExpiry() time.Duration {
 	return c.cfg.PresignExpiry
@@ -186,9 +184,9 @@ func segmentKey(scheduleID, sessionID, streamID string, seq int64) string {
 func (c *Client) UploadSegment(ctx context.Context, scheduleID, sessionID, streamID string, seq int64, data []byte) (string, error) {
 	key := segmentKey(scheduleID, sessionID, streamID, seq)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(c.cfg.RecordingBucket), 
-		Key: aws.String(key), 
-		Body: bytes.NewReader(data), 
+		Bucket:      aws.String(c.cfg.RecordingBucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(data),
 		ContentType: aws.String("video/mp4"),
 	})
 	if err != nil {
@@ -197,13 +195,12 @@ func (c *Client) UploadSegment(ctx context.Context, scheduleID, sessionID, strea
 	return key, nil
 }
 
-
 func (c *Client) UploadServerSegment(ctx context.Context, scheduleID, sessionID, streamID string, seq int64, r io.Reader) (string, error) {
 	key := fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/server-segments/%04d.mp4", scheduleID, sessionID, streamID, seq)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(c.cfg.RecordingBucket),
-		Key: aws.String(key), 
-		Body: r, 
+		Bucket:      aws.String(c.cfg.RecordingBucket),
+		Key:         aws.String(key),
+		Body:        r,
 		ContentType: aws.String("video/mp4"),
 	})
 	if err != nil {
@@ -215,7 +212,6 @@ func (c *Client) UploadServerSegment(ctx context.Context, scheduleID, sessionID,
 func ffmpegSegmentKey(scheduleID, sessionID, streamID string, seq int64) string {
 	return fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/ffmpeg-segments/%04d.mp4", scheduleID, sessionID, streamID, seq)
 }
-
 
 func (c *Client) UploadFFmpegSegment(ctx context.Context, scheduleID, sessionID, streamID string, seq int64, r io.Reader) (string, error) {
 	key := ffmpegSegmentKey(scheduleID, sessionID, streamID, seq)
@@ -231,18 +227,17 @@ func (c *Client) UploadFFmpegSegment(ctx context.Context, scheduleID, sessionID,
 	return key, nil
 }
 
-func finalRecordingKey(scheduleID, sessionID, streamID string) string {
+func FinalRecordingKey(scheduleID, sessionID, streamID string) string {
 	return fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/recording.mp4", scheduleID, sessionID, streamID)
 }
-
 
 // check finalized mp4 file was assemblized and uploaded yet
 // to make sure idempotency for assembler consumer
 func (c *Client) RecordingExists(ctx context.Context, scheduleID, sessionID, streamID string) (bool, error) {
-	key := finalRecordingKey(scheduleID, sessionID, streamID)
+	key := FinalRecordingKey(scheduleID, sessionID, streamID)
 	_, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(c.cfg.RecordingBucket), 
-		Key: aws.String(key),
+		Bucket: aws.String(c.cfg.RecordingBucket),
+		Key:    aws.String(key),
 	})
 	if err != nil {
 		if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
@@ -272,8 +267,8 @@ func (c *Client) Ping(ctx context.Context) error {
 
 func (c *Client) DownloadSegmentToFile(ctx context.Context, key, dstPath string) error {
 	result, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(c.cfg.RecordingBucket), 
-		Key: aws.String(key),
+		Bucket: aws.String(c.cfg.RecordingBucket),
+		Key:    aws.String(key),
 	})
 	if err != nil {
 		return fmt.Errorf("get segment %s: %w", key, err)
@@ -293,11 +288,11 @@ func (c *Client) DownloadSegmentToFile(ctx context.Context, key, dstPath string)
 }
 
 func (c *Client) UploadFinalRecording(ctx context.Context, scheduleID, sessionID, streamID string, r io.Reader) (string, error) {
-	key := finalRecordingKey(scheduleID, sessionID, streamID)
+	key := FinalRecordingKey(scheduleID, sessionID, streamID)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(c.cfg.RecordingBucket), 
-		Key: aws.String(key), 
-		Body: r, 
+		Bucket:      aws.String(c.cfg.RecordingBucket),
+		Key:         aws.String(key),
+		Body:        r,
 		ContentType: aws.String("video/mp4"),
 	})
 	if err != nil {
@@ -308,11 +303,11 @@ func (c *Client) UploadFinalRecording(ctx context.Context, scheduleID, sessionID
 
 func (c *Client) DownloadFrame(ctx context.Context, scheduleID, streamID string, seq int64) ([]byte, error) {
 	out, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(c.cfg.FrameBucket), 
-		Key: aws.String(frameKey(scheduleID, streamID, seq)),
+		Bucket: aws.String(c.cfg.FrameBucket),
+		Key:    aws.String(frameKey(scheduleID, streamID, seq)),
 	})
 	if err != nil {
-		return nil,fmt.Errorf("get frame error: %w", err)
+		return nil, fmt.Errorf("get frame error: %w", err)
 	}
 	defer out.Body.Close()
 	return io.ReadAll(out.Body)
@@ -321,9 +316,9 @@ func (c *Client) DownloadFrame(ctx context.Context, scheduleID, streamID string,
 func (c *Client) UploadFrameJPEG(ctx context.Context, scheduleID, streamID string, seq int64, data []byte) (string, error) {
 	key := fmt.Sprintf("schedules/%s/streams/%s/%010d.jpg", scheduleID, streamID, seq)
 	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(c.cfg.FrameBucket), 
-		Key: aws.String(key), 
-		Body: bytes.NewReader(data), 
+		Bucket:      aws.String(c.cfg.FrameBucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(data),
 		ContentType: aws.String("image/jpeg"),
 	})
 	if err != nil {
