@@ -280,8 +280,10 @@ func main() {
 		},
 	)
 
+	streamStartedCfg := kafkaCfg
+	streamStartedCfg.GroupID = kafkaCfg.GroupID + ".stream-started"
 	streamStartedConsumer := queue.NewConsumer(
-		kafkaCfg,
+		streamStartedCfg,
 		domain.TopicStreamStarted,
 		handleStreamStarted(logger, monitorUseCase),
 		logger,
@@ -293,8 +295,11 @@ func main() {
 			MaxDLQFails:        10,
 		},
 	)
+
+	streamEndedCfg := kafkaCfg
+	streamEndedCfg.GroupID = kafkaCfg.GroupID + ".stream-ended"
 	streamEndedConsumer := queue.NewConsumer(
-		kafkaCfg,
+		streamEndedCfg,
 		domain.TopicStreamEnded,
 		handleStreamEnded(logger, monitorUseCase),
 		logger,
@@ -323,8 +328,11 @@ func main() {
 			MaxDLQFails:        3,
 		},
 	)
+
+	recordingAssemblerCfg := assemblerKafkaCfg
+	recordingAssemblerCfg.GroupID = assemblerKafkaCfg.GroupID + ".recording-requested"
 	recordingAssemblerConsumer := queue.NewConsumer(
-		assemblerKafkaCfg,
+		recordingAssemblerCfg,
 		domain.TopicRecordingAssemblyRequested,
 		handleRecordingAssembly(assemblerUseCase),
 		logger,

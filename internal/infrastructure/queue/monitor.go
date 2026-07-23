@@ -66,32 +66,49 @@ type ConsumerKey struct {
 }
 
 type AlertConfig struct {
-	LagThreshold int64
-	LagDuration  time.Duration
-	DLQThreshold int64
+	LagThreshold        int64
+	LagDuration         time.Duration
+	DLQThreshold        int64
+	FetchErrorThreshold int64
 }
 
 var DefaultAlertConfigs = map[string]AlertConfig{
 	domain.TopicFrameReady: {
-		LagThreshold: 1000, // waiting 1000 frames
-		LagDuration:  2 * time.Minute,
-		DLQThreshold: 50,
+		LagThreshold:        1000, // waiting 1000 frames
+		LagDuration:         2 * time.Minute,
+		DLQThreshold:        50,
+		FetchErrorThreshold: 20,
 	},
 	domain.TopicStreamStarted: {
-		LagThreshold: 20,
-		LagDuration:  1 * time.Minute,
-		DLQThreshold: 5,
+		LagThreshold:        20,
+		LagDuration:         1 * time.Minute,
+		DLQThreshold:        5,
+		FetchErrorThreshold: 5,
 	},
 	domain.TopicStreamEnded: {
-		LagThreshold: 20, // assembler processing, higher lag throughput
-		LagDuration:  1 * time.Minute,
-		DLQThreshold: 3,
+		LagThreshold:        20, // assembler processing, higher lag throughput
+		LagDuration:         1 * time.Minute,
+		DLQThreshold:        3,
+		FetchErrorThreshold: 5,
 	},
 	domain.TopicScheduleClosed: {
-		LagThreshold: 5,
-		LagDuration:  30 * time.Second,
-		DLQThreshold: 1, // alert to all
+		LagThreshold:        5,
+		LagDuration:         30 * time.Second,
+		DLQThreshold:        1, // alert to all
+		FetchErrorThreshold: 3,
 	},
+}
+
+// fallbackAlertConfig applies to any consumer whose topic has neither an
+// explicit override nor an entry in DefaultAlertConfigs — without this,
+// BuildAlertConfigs silently drops the consumer from alertConfigs and it
+// gets no lag/DLQ/fetch-error alerting at all (see TopicRecordingAssemblyRequested,
+// which shipped with no entry until this fallback was added).
+var fallbackAlertConfig = AlertConfig{
+	LagThreshold:        100,
+	LagDuration:         2 * time.Minute,
+	DLQThreshold:        5,
+	FetchErrorThreshold: 10,
 }
 
 func BuildAlertConfigs(consumers []*Consumer, defaults map[string]AlertConfig, overrides map[ConsumerKey]AlertConfig) map[ConsumerKey]AlertConfig {
@@ -102,6 +119,8 @@ func BuildAlertConfigs(consumers []*Consumer, defaults map[string]AlertConfig, o
 			result[key] = override
 		} else if def, ok := defaults[c.topic]; ok {
 			result[key] = def
+		} else {
+			result[key] = fallbackAlertConfig
 		}
 	}
 	return result
@@ -136,7 +155,8 @@ type Monitor struct {
 	lagExceededSince map[ConsumerKey]time.Time
 	mu               sync.Mutex
 
-	dlqCountSnapshot map[ConsumerKey]int64
+	dlqCountSnapshot        map[ConsumerKey]int64
+	fetchErrorCountSnapshot map[ConsumerKey]int64
 }
 
 func NewMonitor(
@@ -153,9 +173,9 @@ func NewMonitor(
 		alertFn:      alertFn,
 		logger:       logger,
 
-		lagExceededSince: make(map[ConsumerKey]time.Time),
-		dlqCountSnapshot: make(map[ConsumerKey]int64),
-
+		lagExceededSince:        make(map[ConsumerKey]time.Time),
+		dlqCountSnapshot:        make(map[ConsumerKey]int64),
+		fetchErrorCountSnapshot: make(map[ConsumerKey]int64),
 	}
 }
 
@@ -289,6 +309,38 @@ func (m *Monitor) RecordDLQ(topic, groupID, reason string, writeDuration time.Du
 
 		m.mu.Lock()
 		m.dlqCountSnapshot[key] = 0
+		m.mu.Unlock()
+	}
+}
+
+func (m *Monitor) RecordFetchError(topic, groupID string) {
+	metricFetchErrors.WithLabelValues(topic, groupID).Inc()
+
+	key := ConsumerKey{Topic: topic, GroupID: groupID}
+
+	alertCfg, hasAlert := m.alertConfigs[key]
+	if !hasAlert {
+		return
+	}
+
+	m.mu.Lock()
+	m.fetchErrorCountSnapshot[key]++
+	count := m.fetchErrorCountSnapshot[key]
+	m.mu.Unlock()
+
+	if count >= alertCfg.FetchErrorThreshold {
+		m.fireAlert(Alert{
+			Level:     AlertWarning,
+			Topic:     topic,
+			GroupID:   groupID,
+			Message:   fmt.Sprintf("Kafka fetch lỗi %d lần liên tiếp - kiểm tra kết nối broker/consumer group", count),
+			Value:     count,
+			Threshold: alertCfg.FetchErrorThreshold,
+			At:        time.Now(),
+		})
+
+		m.mu.Lock()
+		m.fetchErrorCountSnapshot[key] = 0
 		m.mu.Unlock()
 	}
 }
