@@ -112,13 +112,24 @@ func (u *SegmentUseCase) Upload(ctx context.Context, req SegmentUploadRequest) e
 	})
 }
 
-func (u *SegmentUseCase) Audit(ctx context.Context, streamID string) (*StreamAudit, error) {
-	metas, err := u.segments.List(ctx, streamID)
+// Audit requires the same upload-token ownership as Upload/MarkComplete: streamIDs are UUIDs
+// visible in the segment upload URL, so without this check anyone who observed a candidate's
+// streamId could read another candidate's segment coverage.
+func (u *SegmentUseCase) Audit(ctx context.Context, req SegmentUploadRequest) (*StreamAudit, error) {
+	session, err := u.sessions.LookupUpload(ctx, req.StreamID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateUploadOwnership(session, req); err != nil {
+		return nil, err
+	}
+
+	metas, err := u.segments.List(ctx, req.StreamID)
 	if err != nil {
 		return nil, err
 	}
 	audit := &StreamAudit{
-		StreamID:      streamID,
+		StreamID:      req.StreamID,
 		TotalSegments: len(metas),
 	}
 	if len(metas) == 0 {

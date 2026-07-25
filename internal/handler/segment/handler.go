@@ -209,6 +209,73 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	api.WriteNoContent(w)
 }
 
+// Audit handles GET /stream/sessions/{streamId}/audit. Read-only, so unlike Upload it is not
+// gated on session.Completed -- inspecting segment coverage should work both before and after
+// the client has called /complete.
+func (h *SegmentHandler) Audit(w http.ResponseWriter, r *http.Request) {
+	uploadToken, err := bearerToken(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	streamID := r.PathValue("streamId")
+	if _, err := uuid.Parse(streamID); err != nil {
+		http.Error(w, "invalid streamId", http.StatusBadRequest)
+		return
+	}
+
+	req := usecase.SegmentUploadRequest{
+		StreamID:    streamID,
+		UploadToken: uploadToken,
+	}
+	audit, err := h.useCase.Audit(r.Context(), req)
+	if err != nil {
+		h.logger.Warn("segment audit failed",
+			zap.String("streamId", streamID),
+			zap.Error(err),
+		)
+		writeUseCaseError(w, err, "audit failed")
+		return
+	}
+
+	if err := api.WriteJSON(w, http.StatusOK, toAuditResponse(audit)); err != nil {
+		h.logger.Warn("write segment audit response failed", zap.String("streamId", streamID), zap.Error(err))
+	}
+}
+
+type AuditGapResponse struct {
+	FromSeq     int64 `json:"fromSeq"`
+	ToSeq       int64 `json:"toSeq"`
+	MissingSecs int64 `json:"missingSecs"`
+}
+
+type AuditResponse struct {
+	StreamID             string             `json:"streamId"`
+	TotalSegments        int                `json:"totalSegments"`
+	RecordedDurationSecs int64              `json:"recordedDurationSecs"`
+	HasGaps              bool               `json:"hasGaps"`
+	Gaps                 []AuditGapResponse `json:"gaps"`
+}
+
+func toAuditResponse(audit *usecase.StreamAudit) AuditResponse {
+	gaps := make([]AuditGapResponse, len(audit.Gaps))
+	for i, g := range audit.Gaps {
+		gaps[i] = AuditGapResponse{
+			FromSeq:     g.FromSeq,
+			ToSeq:       g.ToSeq,
+			MissingSecs: int64(g.Missing.Seconds()),
+		}
+	}
+	return AuditResponse{
+		StreamID:             audit.StreamID,
+		TotalSegments:        audit.TotalSegments,
+		RecordedDurationSecs: int64(audit.RecordedDuration.Seconds()),
+		HasGaps:              audit.HasGaps,
+		Gaps:                 gaps,
+	}
+}
+
 type CreateSessionRequest struct {
 	StreamType string `json:"streamType"`
 }

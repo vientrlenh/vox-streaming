@@ -16,5 +16,6 @@ func Register(mux *http.ServeMux, webrtcHandler *webrtc.Handler, segmentHandler 
 	mux.HandleFunc("POST /stream/sessions", segmentHandler.CreateSession)
 	mux.HandleFunc("PUT /stream/sessions/{streamId}/segments/{seq}", segmentHandler.Upload)
 	mux.HandleFunc("POST /stream/sessions/{streamId}/complete", segmentHandler.Complete)
+	mux.HandleFunc("GET /stream/sessions/{streamId}/audit", segmentHandler.Audit)
 	mux.HandleFunc("POST /internal/recordings/playback", recordHandler.CreatePlaybackURL)
 }
