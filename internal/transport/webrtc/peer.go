@@ -26,6 +26,10 @@ const (
 	StreamTypeScreen = "screen"
 
 	defaultFrameInterval = 5 * time.Second
+
+	// mirrors recorder.defaultHLSSegmentSeconds — used as the periodic
+	// keyframe-request interval when HLSSegmentSeconds isn't configured.
+	defaultHLSSegmentSeconds = 4
 )
 
 type PeerConfig struct {
@@ -46,6 +50,13 @@ type FFmpegIngestOptions struct {
 	MaxDelayMicros     int // ffmpeg -max_delay (microseconds); <= 0 uses ffmpegingest's default (500000)
 	MaxRestartAttempts int
 	StopTimeout        time.Duration // grace period for ffmpeg to quit gracefully at stream end before being force-killed
+
+	// HLS live-rewind output — parallel to the archival segment output above,
+	// see recorder.HLSOptions. Best-effort: failures here never affect the
+	// archival recording's completeness signal.
+	HLSEnabled        bool
+	HLSSegmentSeconds int
+	HLSAudioBitrateK  int
 }
 
 // coordinates waiting for both the video and audio track
@@ -65,6 +76,10 @@ type ffmpegIngestState struct {
 	segMu      sync.Mutex
 	segs       []cache.SegmentMeta
 	uploadDone chan struct{}
+
+	// hlsUploadDone closes once runHLSFragmentUploader drains sup.HLSFragments()
+	// (nil if HLS wasn't enabled for this stream).
+	hlsUploadDone chan struct{}
 
 	// incomplete is set true the moment we know the final recording can't
 	// possibly cover the whole stream — a segment upload failed permanently,
@@ -115,6 +130,7 @@ type Peer struct {
 	monitorUseCase *usecase.MonitorUseCase
 	storage *storage.Client
 	segments *cache.SegmentRegistry
+	hlsFragments *cache.HLSFragmentRegistry
 
 	aiRelay AIRelayOptions
 	ffmpegIngestCfg FFmpegIngestOptions
@@ -132,10 +148,11 @@ type Peer struct {
 func NewPeer(
 	cfg PeerConfig,
 	scheduleID, sessionID, participantID, streamType string,
-	streamUseCase *usecase.StreamUseCase, 
+	streamUseCase *usecase.StreamUseCase,
 	monitorUseCase *usecase.MonitorUseCase,
-	storage *storage.Client, 
-	segments *cache.SegmentRegistry, 
+	storage *storage.Client,
+	segments *cache.SegmentRegistry,
+	hlsFragments *cache.HLSFragmentRegistry,
 	logger *zap.Logger,
 ) (*Peer, error) {
 
@@ -170,6 +187,7 @@ func NewPeer(
 		monitorUseCase: monitorUseCase,
 		storage: storage,
 		segments: segments,
+		hlsFragments: hlsFragments,
 		aiRelay:       cfg.AIRelay,
 		ffmpegIngestCfg: cfg.FFmpegIngest,
 		tempDir:         cfg.TempDir,
@@ -202,6 +220,10 @@ func (p *Peer) setupCallbacks() {
 				); err != nil {
 					p.logger.Error("notify stream started failed", zap.Error(err))
 				}
+				// Started here, in the same once-block that registers the session,
+				// so the key can never outlive its only refresher or be refreshed
+				// before it exists.
+				go p.runSessionHeartbeat()
 			})
 		case webrtc.PeerConnectionStateDisconnected:
 			p.logger.Warn("peer disconnected, starting grace period")
@@ -293,8 +315,14 @@ func (p *Peer) noteFFmpegIngestTrack(video bool, track *webrtc.TrackRemote, rece
 		}
 	}
 
+	hlsOpts := recorder.HLSOptions{
+		Enabled:        p.ffmpegIngestCfg.HLSEnabled && p.hlsFragments != nil,
+		SegmentSeconds: p.ffmpegIngestCfg.HLSSegmentSeconds,
+		AudioBitrateK:  p.ffmpegIngestCfg.HLSAudioBitrateK,
+	}
+
 	outDir := filepath.Join(p.tempDir, "ffmpeg-ingest", p.streamID)
-	sup, err := recorder.StartRecorderSupervisor(session.SDPPath(), outDir, p.ffmpegIngestCfg.SegmentSeconds, p.ffmpegIngestCfg.ReorderQueueSize, p.ffmpegIngestCfg.MaxDelayMicros, p.ffmpegIngestCfg.MaxRestartAttempts, p.ffmpegIngestCfg.StopTimeout, requestKeyframe, p.logger)
+	sup, err := recorder.StartRecorderSupervisor(session.SDPPath(), outDir, p.ffmpegIngestCfg.SegmentSeconds, p.ffmpegIngestCfg.ReorderQueueSize, p.ffmpegIngestCfg.MaxDelayMicros, p.ffmpegIngestCfg.MaxRestartAttempts, p.ffmpegIngestCfg.StopTimeout, requestKeyframe, hlsOpts, p.logger)
 	if err != nil {
 		p.logger.Warn("ffmpeg recorder start failed", zap.Error(err))
 		<-p.ffmpegIngestCfg.RecordSem
@@ -318,21 +346,30 @@ func (p *Peer) noteFFmpegIngestTrack(video bool, track *webrtc.TrackRemote, rece
 		st.mu.Unlock()
 		p.logger.Warn("peer closed while ffmpeg ingest was starting, rolling back")
 		go func() {
-			// runFFmpegSegmentUploader was never started on this path — drain
-			// Segments() ourselves before/while calling Stop(), otherwise a
-			// segment ffmpeg does manage to flush during shutdown has no
-			// consumer, blocking the unbuffered segCh send forever and
-			// hanging Stop() (same hazard as the bounded-upload fix, just
-			// with zero consumers instead of a slow one).
+			// runFFmpegSegmentUploader/runHLSFragmentUploader were never
+			// started on this path — drain both channels ourselves
+			// before/while calling Stop(), otherwise an asset ffmpeg does
+			// manage to flush during shutdown has no consumer, blocking the
+			// unbuffered channel send forever and hanging Stop() (same
+			// hazard as the bounded-upload fix, just with zero consumers
+			// instead of a slow one).
 			drainDone := make(chan struct{})
+			hlsDrainDone := make(chan struct{})
 			go func() {
 				defer close(drainDone)
 				for path := range sup.Segments() {
 					os.Remove(path)
 				}
 			}()
+			go func() {
+				defer close(hlsDrainDone)
+				for evt := range sup.HLSFragments() {
+					os.Remove(evt.Path)
+				}
+			}()
 			sup.Stop()
 			<-drainDone
+			<-hlsDrainDone
 			sup.Cleanup()
 			session.Close()
 			<-p.ffmpegIngestCfg.RecordSem
@@ -344,10 +381,75 @@ func (p *Peer) noteFFmpegIngestTrack(video bool, track *webrtc.TrackRemote, rece
 	st.supervisor = sup
 	st.recordSlotHeld = true
 	st.uploadDone = make(chan struct{})
+	if hlsOpts.Enabled {
+		st.hlsUploadDone = make(chan struct{})
+	}
 	st.mu.Unlock()
 	go p.runFFmpegSegmentUploader(st, sup)
+	if hlsOpts.Enabled {
+		go p.runHLSFragmentUploader(st, sup)
+		go p.runPeriodicKeyframeRequests(requestKeyframe, hlsOpts.SegmentSeconds)
+	} else {
+		requestKeyframe()
+	}
+}
 
+// Comfortably inside cache.sessionTTL (5 min) so a single missed tick — a slow
+// Redis round-trip, a GC pause — can never let the key lapse.
+const sessionHeartbeatInterval = 60 * time.Second
+
+// runSessionHeartbeat keeps this peer's Redis session registration alive for as
+// long as the peer itself is alive.
+//
+// That registration is what makes the stream visible to monitors at all: the
+// student list comes from it, and GetLiveManifest refuses to serve live rewind
+// for a stream it can't find there. It used to be refreshed only as a side
+// effect of the periodic JPEG frame capture in handleVideoTrack, which meant
+// anything that stopped that one loop — a non-H.264 track, a stalled frame
+// upload, a track read error — silently expired the session 5 minutes later
+// while media kept flowing perfectly, and the teacher's player died on a
+// "stream is not live" 404 with nothing in the logs to explain it. Tying the
+// heartbeat to p.done instead makes liveness mean exactly what it should: the
+// peer connection is open (ICE failure/disconnect already closes it, see
+// setupCallbacks).
+func (p *Peer) runSessionHeartbeat() {
+	ticker := time.NewTicker(sessionHeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.done:
+			return
+		case <-ticker.C:
+			if err := p.streamUseCase.RefreshStream(
+				context.Background(), p.scheduleID, p.sessionID, p.participantID, p.streamType,
+			); err != nil {
+				p.logger.Warn("session heartbeat failed - monitor may lose this peer", zap.Error(err))
+			}
+		}
+	}
+}
+
+// runPeriodicKeyframeRequests keeps HLS fragment boundaries (and therefore
+// live-rewind seek granularity) bounded to roughly intervalSeconds: -c:v copy
+// means ffmpeg can only cut a fragment at a keyframe, and browsers don't emit
+// keyframes on a short cadence on their own — a single request at stream
+// start (the archival-only behavior) isn't enough once HLS is enabled.
+func (p *Peer) runPeriodicKeyframeRequests(requestKeyframe func(), intervalSeconds int) {
+	if intervalSeconds <= 0 {
+		intervalSeconds = defaultHLSSegmentSeconds
+	}
+	time.Sleep(200 * time.Millisecond)
 	requestKeyframe()
+	ticker := time.NewTicker(time.Duration(intervalSeconds) * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.done:
+			return
+		case <-ticker.C:
+			requestKeyframe()
+		}
+	}
 }
 
 // resets sessionStarting after a failed or aborted
@@ -464,6 +566,116 @@ func (p *Peer) uploadFFmpegSegmentOnce(ctx context.Context, path string, seq int
 	}
 	defer f.Close()
 	return p.storage.UploadFFmpegSegment(attemptCtx, p.scheduleID, p.sessionID, p.streamID, seq, f)
+}
+
+// runHLSFragmentUploader uploads the parallel HLS live-rewind assets as they
+// land and registers each one in Redis synchronously (unlike the archival
+// uploader above, which only buffers in memory and flushes to Redis at
+// close() — live availability during the stream is the entire point here).
+// Best-effort throughout: any failure is logged and skipped, never touches
+// st.incomplete or blocks the archival recording's own bookkeeping.
+func (p *Peer) runHLSFragmentUploader(st *ffmpegIngestState, sup *recorder.RecorderSupervisor) {
+	defer close(st.hlsUploadDone)
+	if p.storage == nil || p.hlsFragments == nil {
+		return
+	}
+	var seq int64
+	// StartedAt/EndedAt below are built from ffmpeg's own reported per-fragment durations
+	// (evt.Duration, parsed from #EXTINF in hls_watch.go), NOT wall-clock time around the upload --
+	// S3 upload runs sequentially here, so measuring "now" before/after each upload would silently
+	// bake that fragment's own upload latency into the *next* fragment's reported duration,
+	// corrupting the EXTINF values buildLiveManifest later emits (and, with them, hls.js's DVR
+	// timeline/seek behavior on the monitor). baseTime/cumulative resets per epoch since
+	// buildLiveManifest already inserts #EXT-X-DISCONTINUITY at an epoch boundary, so the absolute
+	// value carried across a restart doesn't need to (and shouldn't have to) stay continuous.
+	var baseTime time.Time
+	var cumulative time.Duration
+	lastEpoch := -1
+	for evt := range sup.HLSFragments() {
+		ctx := context.Background()
+		if evt.IsInit {
+			if err := p.uploadHLSInit(ctx, evt); err != nil {
+				p.logger.Warn("hls init segment upload failed, live rewind unavailable for this attempt",
+					zap.Int("epoch", evt.Epoch),
+					zap.Error(err),
+				)
+			}
+			continue
+		}
+
+		if evt.Epoch != lastEpoch {
+			// A fragment event only fires once ffmpeg has CLOSED that fragment and
+			// rotated away from it, so "now" is the end of its media, not the
+			// start -- anchoring the epoch here without backing off its own
+			// duration put every fragment's StartedAt/EndedAt (and therefore the
+			// #EXT-X-PROGRAM-DATE-TIME the manifest derives from them) a whole
+			// fragment late, which the monitor sees as the DVR window claiming to
+			// start seconds after the stream really did.
+			baseTime = time.Now().UTC().Add(-evt.Duration)
+			cumulative = 0
+			lastEpoch = evt.Epoch
+		}
+		startedAt := baseTime.Add(cumulative)
+		cumulative += evt.Duration
+		endedAt := baseTime.Add(cumulative)
+
+		if err := p.uploadHLSFragment(ctx, evt, seq, startedAt, endedAt); err != nil {
+			p.logger.Warn("hls fragment upload failed, live rewind gap for this stream",
+				zap.Int64("seq", seq),
+				zap.Error(err),
+			)
+		}
+		seq++
+	}
+}
+
+func (p *Peer) uploadHLSInit(ctx context.Context, evt recorder.HLSFragmentEvent) error {
+	f, err := os.Open(evt.Path)
+	if err != nil {
+		return fmt.Errorf("open hls init segment: %w", err)
+	}
+	defer f.Close()
+
+	attemptCtx, cancel := context.WithTimeout(ctx, ffmpegSegmentUploadAttemptTimeout)
+	defer cancel()
+	s3Key, err := p.storage.UploadHLSInit(attemptCtx, p.scheduleID, p.sessionID, p.streamID, evt.Epoch, f)
+	if err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	if err := p.hlsFragments.AddInit(ctx, p.streamID, cache.HLSInitMeta{
+		Epoch: evt.Epoch, S3Key: s3Key, UploadedAt: time.Now().UTC(),
+	}); err != nil {
+		return fmt.Errorf("register: %w", err)
+	}
+	os.Remove(evt.Path)
+	return nil
+}
+
+func (p *Peer) uploadHLSFragment(ctx context.Context, evt recorder.HLSFragmentEvent, seq int64, startedAt, endedAt time.Time) error {
+	f, err := os.Open(evt.Path)
+	if err != nil {
+		return fmt.Errorf("open hls fragment: %w", err)
+	}
+	defer f.Close()
+	var size int64
+	if stat, statErr := f.Stat(); statErr == nil {
+		size = stat.Size()
+	}
+
+	attemptCtx, cancel := context.WithTimeout(ctx, ffmpegSegmentUploadAttemptTimeout)
+	defer cancel()
+	s3Key, err := p.storage.UploadHLSFragment(attemptCtx, p.scheduleID, p.sessionID, p.streamID, seq, f)
+	if err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	if err := p.hlsFragments.AddFragment(ctx, p.streamID, cache.HLSFragmentMeta{
+		Seq: seq, Epoch: evt.Epoch, S3Key: s3Key,
+		StartedAt: startedAt, EndedAt: endedAt, SizeBytes: size, UploadedAt: time.Now().UTC(),
+	}); err != nil {
+		return fmt.Errorf("register: %w", err)
+	}
+	os.Remove(evt.Path)
+	return nil
 }
 
 func (p *Peer) scheduleClose(d time.Duration) {
@@ -695,6 +907,7 @@ func (p *Peer) close() {
 			sup := p.ffmpegIngest.supervisor
 			slotHeld := p.ffmpegIngest.recordSlotHeld
 			uploadDone := p.ffmpegIngest.uploadDone
+			hlsUploadDone := p.ffmpegIngest.hlsUploadDone
 			hadVideoTrack = p.ffmpegIngest.videoTrack != nil
 			p.ffmpegIngest.mu.Unlock()
 			// stop the recorder first so ffmpeg can flush its current segment
@@ -736,6 +949,19 @@ func (p *Peer) close() {
 					sup.Stop() // idempotent — StopProcess already ran; this just waits for doneCh (segCh drain) now
 					if uploadDone != nil {
 						<-uploadDone
+					}
+					// Best-effort, bounded: HLS upload failures/timeouts here are
+					// logged only and never set incomplete — the archival
+					// recording's own completeness signal (right below) is
+					// entirely independent of live-rewind availability.
+					if hlsUploadDone != nil {
+						select {
+						case <-hlsUploadDone:
+						case <-time.After(ffmpegUploadDrainTimeout):
+							p.logger.Warn("hls fragment upload did not finish in time, live rewind may be incomplete for this stream",
+								zap.Duration("waited", ffmpegUploadDrainTimeout),
+							)
+						}
 					}
 					if p.ffmpegIngest.incomplete.Load() {
 						p.logger.Warn("ffmpeg ingest had a failed/incomplete segment, skipping temp dir cleanup for manual recovery",

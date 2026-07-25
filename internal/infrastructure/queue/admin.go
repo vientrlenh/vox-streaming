@@ -69,6 +69,41 @@ var RequiredTopics = []TopicSpec{
 	},
 }
 
+// Floor on dead-letter retention. A DLQ message is only worth writing if someone
+// can still find it afterwards, and some source topics keep their own data for as
+// little as an hour.
+const dlqRetentionMS int64 = 604800000 // 7 days
+
+// dlqTopicSpecs derives the dead-letter topic for each required topic.
+//
+// These must be created explicitly: DLQWriter produces to "<topic>.dlq" (see
+// NewDLQWriter) and nothing else ever declares them, so without this every DLQ
+// write fails with UNKNOWN_TOPIC_OR_PARTITION -- the safety net looks wired up
+// but catches nothing, and the only sign is the consumer's own "CRITICAL: handler
+// and DLQ both failed" line, at exactly the moment you can least afford to lose
+// the message.
+//
+// Derived from RequiredTopics instead of listed by hand so the two can never
+// drift. A spare unused .dlq for a topic this service only ever produces to costs
+// nothing next to a missing one.
+func dlqTopicSpecs() []TopicSpec {
+	specs := make([]TopicSpec, 0, len(RequiredTopics))
+	for _, spec := range RequiredTopics {
+		retention := spec.RetentionMS
+		// Leave -1 (unlimited) alone rather than clamping it down to the floor.
+		if retention >= 0 && retention < dlqRetentionMS {
+			retention = dlqRetentionMS
+		}
+		specs = append(specs, TopicSpec{
+			Name:              spec.Name + dlqSuffix,
+			NumPartitions:     spec.NumPartitions,
+			ReplicationFactor: spec.ReplicationFactor,
+			RetentionMS:       retention,
+		})
+	}
+	return specs
+}
+
 func EnsureTopics(ctx context.Context, cfg Config, brokers []string, logger *zap.Logger) error {
 	if len(brokers) == 0 {
 		return fmt.Errorf("broker is empty")
@@ -95,8 +130,12 @@ func EnsureTopics(ctx context.Context, cfg Config, brokers []string, logger *zap
 	}
 	defer controllerCon.Close()
 
-	topicConfigs := make([]kafka.TopicConfig, 0, len(RequiredTopics))
-	for _, spec := range RequiredTopics {
+	allSpecs := make([]TopicSpec, 0, len(RequiredTopics)*2)
+	allSpecs = append(allSpecs, RequiredTopics...)
+	allSpecs = append(allSpecs, dlqTopicSpecs()...)
+
+	topicConfigs := make([]kafka.TopicConfig, 0, len(allSpecs))
+	for _, spec := range allSpecs {
 		topicConfigs = append(topicConfigs, kafka.TopicConfig{
 			Topic:             spec.Name,
 			NumPartitions:     spec.NumPartitions,
@@ -120,10 +159,11 @@ func EnsureTopics(ctx context.Context, cfg Config, brokers []string, logger *zap
 		}
 	}
 
-	for _, spec := range RequiredTopics {
+	for _, spec := range allSpecs {
 		logger.Info("kafka topic ensured",
 			zap.String("topic", spec.Name),
 			zap.Int("partitions", spec.NumPartitions),
+			zap.Int64("retentionMs", spec.RetentionMS),
 		)
 	}
 	return nil

@@ -57,16 +57,19 @@ func (u *StreamUseCase) NotifyStreamStarted(ctx context.Context, scheduleID, ses
 	return nil
 }
 
-func (u *StreamUseCase) PublishFrame(ctx context.Context, scheduleID, sessionID, participantID, streamID, streamType, frameURL string, seq int64) error {
-	// refresh Redis trước để tách độc lập với Kafka
-	// frame tick = peer đang sống -> refresh session dù Kafka có fail hay không
+// RefreshStream extends the TTL on an in-progress stream's session
+// registration. Called on its own cadence by the peer's heartbeat (see
+// webrtc.Peer.runSessionHeartbeat) rather than piggybacking on PublishFrame the
+// way it used to: keeping a stream visible to monitors must not depend on the
+// unrelated periodic-JPEG path still working.
+func (u *StreamUseCase) RefreshStream(ctx context.Context, scheduleID, sessionID, participantID, streamType string) error {
 	if err := u.sessions.Refresh(ctx, scheduleID, sessionID, participantID, streamType); err != nil {
-		u.logger.Warn("session refresh failed",
-			zap.String("streamId", streamID),
-			zap.Error(err),
-		)
+		return fmt.Errorf("refresh stream session: %w", err)
 	}
+	return nil
+}
 
+func (u *StreamUseCase) PublishFrame(ctx context.Context, scheduleID, sessionID, participantID, streamID, streamType, frameURL string, seq int64) error {
 	event := domain.FrameReadyEvent{
 		EventID:       uuid.NewString(),
 		ScheduleID:    scheduleID,

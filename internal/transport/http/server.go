@@ -12,6 +12,11 @@ func Register(mux *http.ServeMux, webrtcHandler *webrtc.Handler, segmentHandler 
 	mux.HandleFunc("/ws/stream", webrtcHandler.ServeStream)
 	mux.HandleFunc("/ws/monitor", webrtcHandler.ServeMonitor)
 	mux.HandleFunc("/schedules/active", webrtcHandler.GetActiveSchedules)
+	// The literal "playlist.m3u8" segment is more specific than the {asset}
+	// wildcard below, so ServeMux routes the manifest to its own handler even
+	// though both patterns match it (Go 1.22+ precedence rules).
+	mux.HandleFunc("GET /live/{scheduleId}/{streamId}/playlist.m3u8", webrtcHandler.GetLiveManifest)
+	mux.HandleFunc("GET /live/{scheduleId}/{streamId}/{asset}", webrtcHandler.GetLiveAsset)
 
 	mux.HandleFunc("POST /stream/sessions", segmentHandler.CreateSession)
 	mux.HandleFunc("PUT /stream/sessions/{streamId}/segments/{seq}", segmentHandler.Upload)

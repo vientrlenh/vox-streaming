@@ -176,6 +176,16 @@ func main() {
 	recordingHandler := recordHandler.NewHandler(storageClient, os.Getenv("GRPC_SERVICE_TOKEN"), logger)
 
 	ffmpegIngestOpts := buildFFmpegIngestOptions(logger)
+	hlsFragmentRegistry := cache.NewHLSFragmentRegistry(redisClient)
+	// 0 is a meaningful value here — "no trailing window, serve the DVR from the
+	// stream's start" — so it must be distinguishable from the variable being
+	// unset, which still falls back to a 15-minute tail.
+	liveRewindWindow := 15 * time.Minute
+	if raw := os.Getenv("LIVE_REWIND_WINDOW_MINUTES"); raw != "" {
+		if mins, err := strconv.Atoi(raw); err == nil && mins >= 0 {
+			liveRewindWindow = time.Duration(mins) * time.Minute
+		}
+	}
 
 	tempDir := os.Getenv("SEGMENT_TEMP_DIR")
 	sweepTTLHours, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_TEMP_TTL_HOURS"))
@@ -211,6 +221,8 @@ func main() {
 		examClient,
 		storageClient,
 		segmentRegistry,
+		hlsFragmentRegistry,
+		liveRewindWindow,
 	)
 
 	addr := os.Getenv("WEBRTC_ADDR")
@@ -263,6 +275,12 @@ func main() {
 
 	frameConverterCfg := kafkaCfg
 	frameConverterCfg.GroupID = "vox-frame-converter"
+	// The one consumer that genuinely should skip a backlog: a frame is a periodic
+	// JPEG thumbnail for a monitor watching right now, worthless minutes later, and
+	// the topic keeps an hour of them across 12 partitions. Every other consumer
+	// keeps the FirstOffset default (see queue.DefaultConfig) so nothing durable is
+	// ever silently skipped.
+	frameConverterCfg.StartOffset = kafka.LastOffset
 	maxConv, _ := strconv.Atoi(os.Getenv("FRAME_CONVERT_CONCURRENCY"))
 	frameConvertUseCase := usecase.NewFrameConvertUseCase(storageClient, broadCaster, maxConv, logger)
 
@@ -562,6 +580,18 @@ func buildFFmpegIngestOptions(logger *zap.Logger) webrtcTransport.FFmpegIngestOp
 
 	maxDelayMs, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_MAX_DELAY_MS"))
 
+	// Live-rewind HLS output — off by default. A separate, parallel ffmpeg
+	// output muxer alongside the archival one above; see recorder.HLSOptions.
+	hlsEnabled := os.Getenv("FFMPEG_INGEST_HLS_ENABLED") == "true"
+	hlsSegmentSeconds, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_HLS_SEGMENT_SECONDS"))
+	if hlsSegmentSeconds == 0 {
+		hlsSegmentSeconds = 4
+	}
+	hlsAudioBitrateK, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_HLS_AUDIO_BITRATE_K"))
+	if hlsAudioBitrateK == 0 {
+		hlsAudioBitrateK = 128
+	}
+
 	logger.Info("ffmpeg ingest bridge enabled",
 		zap.Int("portRangeStart", rangeStart),
 		zap.Int("portRangeEnd", rangeEnd),
@@ -571,6 +601,9 @@ func buildFFmpegIngestOptions(logger *zap.Logger) webrtcTransport.FFmpegIngestOp
 		zap.Int("stopTimeoutSecs", stopTimeoutSecs),
 		zap.Int("reorderQueueSize", reorderQueueSize),
 		zap.Int("maxDelayMs", maxDelayMs),
+		zap.Bool("hlsEnabled", hlsEnabled),
+		zap.Int("hlsSegmentSeconds", hlsSegmentSeconds),
+		zap.Int("hlsAudioBitrateK", hlsAudioBitrateK),
 	)
 	return webrtcTransport.FFmpegIngestOptions{
 		Allocator:          alloc,
@@ -580,6 +613,9 @@ func buildFFmpegIngestOptions(logger *zap.Logger) webrtcTransport.FFmpegIngestOp
 		MaxDelayMicros:     maxDelayMs * 1000,
 		MaxRestartAttempts: maxRestartAttempts,
 		StopTimeout:        time.Duration(stopTimeoutSecs) * time.Second,
+		HLSEnabled:         hlsEnabled,
+		HLSSegmentSeconds:  hlsSegmentSeconds,
+		HLSAudioBitrateK:   hlsAudioBitrateK,
 	}
 }
 

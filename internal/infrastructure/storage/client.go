@@ -61,20 +61,24 @@ func (c *Client) EnsureBuckets(ctx context.Context) error {
 	specs := []struct {
 		bucket        string
 		retentionDays int32
+		// true only for buckets a browser fetches with XHR, where CORS applies: hls.js loads live
+		// rewind fragments out of the recording bucket. Frames are consumed as <img> src, which is
+		// not a CORS request at all.
+		browserFetched bool
 	}{
-		{c.cfg.FrameBucket, 7},
-		{c.cfg.RecordingBucket, 365},
+		{c.cfg.FrameBucket, 7, false},
+		{c.cfg.RecordingBucket, 365, true},
 	}
 
 	for _, spec := range specs {
-		if err := c.ensureBucket(ctx, spec.bucket, spec.retentionDays); err != nil {
+		if err := c.ensureBucket(ctx, spec.bucket, spec.retentionDays, spec.browserFetched); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays int32) error {
+func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays int32, browserFetched bool) error {
 	_, err := c.s3.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(bucket),
 	})
@@ -128,6 +132,33 @@ func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays 
 			zap.String("bucket", bucket),
 			zap.Error(err),
 		)
+	}
+
+	if browserFetched {
+		_, err = c.s3.PutBucketCors(ctx, &s3.PutBucketCorsInput{
+			Bucket: aws.String(bucket),
+			CORSConfiguration: &types.CORSConfiguration{
+				CORSRules: []types.CORSRule{{
+					AllowedMethods: []string{"GET", "HEAD"},
+					// Must be "*", not the service's own ALLOWED_ORIGINS. Browsers reach these
+					// objects by following the 302 that GetLiveAsset returns, and per the Fetch
+					// spec a CORS request redirected to a different origin has its Origin header
+					// replaced with the opaque value "null" -- so no explicit origin list can ever
+					// match on the post-redirect request, and hls.js fails every fragment with
+					// "TypeError: Failed to fetch". Origin is not the access control here anyway:
+					// these are presigned URLs, gated by the signature and its expiry.
+					AllowedOrigins: []string{"*"},
+					AllowedHeaders: []string{"Range"},
+					MaxAgeSeconds:  aws.Int32(3600),
+				}},
+			},
+		})
+		if err != nil {
+			c.logger.Warn("set bucket cors failed",
+				zap.String("bucket", bucket),
+				zap.Error(err),
+			)
+		}
 	}
 	return nil
 }
@@ -223,6 +254,42 @@ func (c *Client) UploadFFmpegSegment(ctx context.Context, scheduleID, sessionID,
 	})
 	if err != nil {
 		return "", fmt.Errorf("upload ffmpeg segment: %w", err)
+	}
+	return key, nil
+}
+
+func hlsInitKey(scheduleID, sessionID, streamID string, epoch int) string {
+	return fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/hls/init-%02d.mp4", scheduleID, sessionID, streamID, epoch)
+}
+
+func hlsFragmentKey(scheduleID, sessionID, streamID string, seq int64) string {
+	return fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/hls/%06d.m4s", scheduleID, sessionID, streamID, seq)
+}
+
+func (c *Client) UploadHLSInit(ctx context.Context, scheduleID, sessionID, streamID string, epoch int, r io.Reader) (string, error) {
+	key := hlsInitKey(scheduleID, sessionID, streamID, epoch)
+	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(c.cfg.RecordingBucket),
+		Key:         aws.String(key),
+		Body:        r,
+		ContentType: aws.String("video/mp4"),
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload hls init segment: %w", err)
+	}
+	return key, nil
+}
+
+func (c *Client) UploadHLSFragment(ctx context.Context, scheduleID, sessionID, streamID string, seq int64, r io.Reader) (string, error) {
+	key := hlsFragmentKey(scheduleID, sessionID, streamID, seq)
+	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(c.cfg.RecordingBucket),
+		Key:         aws.String(key),
+		Body:        r,
+		ContentType: aws.String("video/iso.segment"),
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload hls fragment: %w", err)
 	}
 	return key, nil
 }

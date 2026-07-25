@@ -1,10 +1,14 @@
 package webrtc
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +37,8 @@ type Handler struct {
 	upgrader  websocket.Upgrader
 	storage *storage.Client
 	segments *cache.SegmentRegistry
+	hlsFragments *cache.HLSFragmentRegistry
+	liveRewindWindow time.Duration
 	logger    *zap.Logger
 	validator *auth.Validator
 	broadcaster *RedisBroadcaster
@@ -61,18 +67,22 @@ func NewHandler(
 	allowedOrigins []string,
 	logger *zap.Logger,
 	validator *auth.Validator,
-	broadcaster *RedisBroadcaster, 
-	examClient *grpcclient.ExamClient, 
-	storage *storage.Client, 
-	segments *cache.SegmentRegistry, 
+	broadcaster *RedisBroadcaster,
+	examClient *grpcclient.ExamClient,
+	storage *storage.Client,
+	segments *cache.SegmentRegistry,
+	hlsFragments *cache.HLSFragmentRegistry,
+	liveRewindWindow time.Duration,
 ) *Handler {
 	return &Handler{
 		peerCfg:  peerCfg,
 		sessions: NewSessionManager(),
 		streamUseCase:  streamUseCase,
 		monitorUseCase: monitorUseCase,
-		storage: storage, 
-		segments: segments, 
+		storage: storage,
+		segments: segments,
+		hlsFragments: hlsFragments,
+		liveRewindWindow: liveRewindWindow,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  8192,
 			WriteBufferSize: 8192,
@@ -134,7 +144,7 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rawConn.Close()
 
-	peer, err := NewPeer(h.peerCfg, scheduleID, claims.SessionID, participantID, streamType, h.streamUseCase, h.monitorUseCase, h.storage, h.segments, h.logger)
+	peer, err := NewPeer(h.peerCfg, scheduleID, claims.SessionID, participantID, streamType, h.streamUseCase, h.monitorUseCase, h.storage, h.segments, h.hlsFragments, h.logger)
 	if err != nil {
 		h.logger.Error("peer creation failed", zap.Error(err))
 		_ = rawConn.WriteJSON(map[string]string{
@@ -316,6 +326,198 @@ func (h *Handler) GetActiveSchedules(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(schedules)
+}
+
+// authorizeMonitor validates a monitor token off the query string and checks it
+// covers scheduleID, writing the error response itself and reporting whether the
+// caller may proceed. Shared by both live-rewind endpoints so they can never
+// drift apart on who is allowed to read a stream.
+func (h *Handler) authorizeMonitor(w http.ResponseWriter, r *http.Request, scheduleID string) bool {
+	claims, err := h.validator.ValidateMonitor(r.URL.Query().Get("token"))
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	if !claims.CanMonitorSchedule(scheduleID) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// GetLiveManifest serves a freshly-built HLS media playlist for the live-rewind
+// window of an in-progress stream. Only currently-live streams get a manifest
+// (checked via MonitorUseCase.FindLiveStream, Redis-backed and instance-
+// agnostic) — once a stream ends, monitors should fall back to the final
+// assembled recording's own playback endpoint instead. Note that GetLiveAsset
+// deliberately does NOT repeat that liveness check; see its own comment.
+func (h *Handler) GetLiveManifest(w http.ResponseWriter, r *http.Request) {
+	scheduleID := r.PathValue("scheduleId")
+	streamID := r.PathValue("streamId")
+
+	if !h.authorizeMonitor(w, r, scheduleID) {
+		return
+	}
+
+	if h.hlsFragments == nil {
+		http.Error(w, "live rewind not available", http.StatusNotFound)
+		return
+	}
+
+	info, err := h.monitorUseCase.FindLiveStream(r.Context(), scheduleID, streamID)
+	if err != nil {
+		h.logger.Error("find live stream failed", zap.String("scheduleId", scheduleID), zap.String("streamId", streamID), zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if info == nil {
+		http.Error(w, "stream is not live", http.StatusNotFound)
+		return
+	}
+
+	inits, err := h.hlsFragments.ListInits(r.Context(), streamID)
+	if err != nil {
+		h.logger.Error("list hls init segments failed", zap.String("streamId", streamID), zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	frags, err := h.hlsFragments.ListFragments(r.Context(), streamID)
+	if err != nil {
+		h.logger.Error("list hls fragments failed", zap.String("streamId", streamID), zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Playlist-relative asset names, resolved by the browser against this
+	// playlist's own URL — which keeps the manifest identical in proxy mode
+	// (behind nginx) and direct mode. Each carries a compact per-stream
+	// signature rather than the monitor JWT: a playlist URI does not inherit the
+	// playlist's query string and native players can't add one, so whatever goes
+	// here is repeated on every one of a multi-hour DVR's thousands of lines.
+	// See auth.Validator.SignAsset.
+	sig := url.QueryEscape(h.validator.SignAsset(streamID))
+	assetURI := func(name string) string {
+		return name + "?sig=" + sig
+	}
+
+	manifest, err := buildLiveManifest(inits, frags, h.liveRewindWindow, assetURI)
+	if err != nil {
+		h.logger.Warn("build live manifest failed, no fragments ready yet", zap.String("streamId", streamID), zap.Error(err))
+		http.Error(w, "live rewind not ready yet", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	w.Header().Set("Cache-Control", "no-store")
+	// A full-length DVR playlist is thousands of lines sharing one byte-identical
+	// signature suffix, so gzip takes it down by roughly an order of magnitude —
+	// worth it on a response re-fetched every few seconds for as long as anyone
+	// is watching.
+	writeMaybeGzipped(w, r, manifest)
+}
+
+// GetLiveAsset resolves one stable, playlist-relative HLS asset name back to
+// its stored object and redirects to a freshly presigned URL for it.
+//
+// Authorization is the per-stream signature the manifest embedded (minted only
+// after a full monitor-token check there), or a monitor token directly — the
+// latter so the endpoint stays usable by hand and by any client that would
+// rather pass its own credential.
+//
+// Deliberately does NOT check stream liveness the way GetLiveManifest does:
+// FindLiveStream is a Redis SCAN over the keyspace, which is far too expensive
+// to repeat for every fragment fetch, and a fragment already listed in a
+// manifest the client holds must stay fetchable for a few seconds after the
+// stream ends rather than turning into a mid-playback 404.
+func (h *Handler) GetLiveAsset(w http.ResponseWriter, r *http.Request) {
+	scheduleID := r.PathValue("scheduleId")
+	streamID := r.PathValue("streamId")
+	assetName := r.PathValue("asset")
+
+	// Additive, not either/or: a signature that has aged out falls through to the
+	// token check rather than hard-failing, which is what lets a client holding a
+	// stale playlist (rewinding through fragments it listed a while ago) keep
+	// fetching as long as it still has a valid monitor token.
+	authorized := false
+	if sig := r.URL.Query().Get("sig"); sig != "" {
+		authorized = h.validator.VerifyAsset(streamID, sig) == nil
+	}
+	if !authorized && !h.authorizeMonitor(w, r, scheduleID) {
+		return
+	}
+	if h.hlsFragments == nil || h.storage == nil {
+		http.Error(w, "live rewind not available", http.StatusNotFound)
+		return
+	}
+
+	ref, err := parseHLSAssetName(assetName)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	var s3Key string
+	if ref.IsInit {
+		meta, err := h.hlsFragments.GetInit(r.Context(), streamID, ref.Epoch)
+		if err != nil {
+			h.logger.Error("get hls init segment failed", zap.String("streamId", streamID), zap.Int("epoch", ref.Epoch), zap.Error(err))
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if meta == nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		s3Key = meta.S3Key
+	} else {
+		meta, err := h.hlsFragments.GetFragment(r.Context(), streamID, ref.Seq)
+		if err != nil {
+			h.logger.Error("get hls fragment failed", zap.String("streamId", streamID), zap.Int64("seq", ref.Seq), zap.Error(err))
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if meta == nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		s3Key = meta.S3Key
+	}
+
+	// The stored key embeds the schedule the asset was uploaded under (see
+	// storage.hlsFragmentKey), so this pins the asset to the schedule the token
+	// actually authorizes: guessing another schedule's streamId gets a 404
+	// rather than that schedule's media.
+	if !strings.HasPrefix(s3Key, "schedules/"+scheduleID+"/") {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	signed, err := h.storage.PresignRecording(r.Context(), s3Key, h.storage.PresignExpiry())
+	if err != nil {
+		h.logger.Error("presign hls asset failed", zap.String("streamId", streamID), zap.String("s3Key", s3Key), zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Fragments are immutable once written, so a rewinding client may re-fetch
+	// the same one; cache well inside the presign expiry so the redirect target
+	// can never be replayed after it stops working.
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	http.Redirect(w, r, signed, http.StatusFound)
+}
+
+// writeMaybeGzipped writes body, compressing it when the client advertised
+// gzip. Headers are all set before the first write, as net/http requires.
+func writeMaybeGzipped(w http.ResponseWriter, r *http.Request, body string) {
+	if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		_, _ = io.WriteString(w, body)
+		return
+	}
+	w.Header().Set("Content-Encoding", "gzip")
+	w.Header().Add("Vary", "Accept-Encoding")
+	gz := gzip.NewWriter(w)
+	defer gz.Close()
+	_, _ = io.WriteString(gz, body)
 }
 
 func (h *Handler) runSignaling(conn *safeConn, peer *Peer) {
