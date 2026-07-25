@@ -11,8 +11,8 @@ import (
 )
 
 type FrameBroadcaster interface {
-	HasMonitor(ctx context.Context, roomID string) (bool, error)
-	PublishFrameURL(ctx context.Context, roomID, streamID, streamType, frameURL string, seq int64)
+	HasMonitor(ctx context.Context, scheduleID string) (bool, error)
+	PublishFrameURL(ctx context.Context, scheduleID, streamID, streamType, frameURL string, seq int64)
 }
 
 type FrameConvertUseCase struct {
@@ -35,7 +35,7 @@ func NewFrameConvertUseCase(storage *storage.Client, broadcaster FrameBroadcaste
 }
 
 func (u *FrameConvertUseCase) Convert(ctx context.Context, event domain.FrameReadyEvent) error {
-	watching, err := u.broadcaster.HasMonitor(ctx, event.RoomID)
+	watching, err := u.broadcaster.HasMonitor(ctx, event.ScheduleID)
 	if err != nil {
 		u.logger.Warn("monitor check failed, converting anyway", zap.Error(err))
 	} else if !watching {
@@ -51,7 +51,7 @@ func (u *FrameConvertUseCase) Convert(ctx context.Context, event domain.FrameRea
 		return ctx.Err()
 	}
 
-	annexB, err := u.storage.DownloadFrame(ctx, event.RoomID, event.StreamID, event.SequenceNo)
+	annexB, err := u.storage.DownloadFrame(ctx, event.ScheduleID, event.StreamID, event.SequenceNo)
 	if err != nil {
 		return fmt.Errorf("download frame: %w", err)
 	}
@@ -61,7 +61,7 @@ func (u *FrameConvertUseCase) Convert(ctx context.Context, event domain.FrameRea
 		return fmt.Errorf("jpeg decode: %w", err)
 	}
 
-	key, err := u.storage.UploadFrameJPEG(ctx, event.RoomID, event.StreamID, event.SequenceNo, jpeg)
+	key, err := u.storage.UploadFrameJPEG(ctx, event.ScheduleID, event.StreamID, event.SequenceNo, jpeg)
 	if err != nil {
 		return fmt.Errorf("upload jpeg: %w", err)
 	}
@@ -70,6 +70,6 @@ func (u *FrameConvertUseCase) Convert(ctx context.Context, event domain.FrameRea
 	if err != nil {
 		url = key
 	}
-	u.broadcaster.PublishFrameURL(ctx, event.RoomID, event.StreamID, event.StreamType, url, event.SequenceNo)
+	u.broadcaster.PublishFrameURL(ctx, event.ScheduleID, event.StreamID, event.StreamType, url, event.SequenceNo)
 	return nil
 }

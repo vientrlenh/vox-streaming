@@ -30,26 +30,26 @@ func NewRedisBroadcaster(client *redis.Client, logger *zap.Logger) *RedisBroadca
 	}
 }
 
-func roomChannel(roomID string) string {
-	return "room:" + roomID + ":frames"
+func scheduleChannel(scheduleID string) string {
+	return "schedule:" + scheduleID + ":frames"
 }
 
-func (b *RedisBroadcaster) Publish(ctx context.Context, roomID string, notif FrameNotification) {
+func (b *RedisBroadcaster) Publish(ctx context.Context, scheduleID string, notif FrameNotification) {
 	data, err := json.Marshal(notif)
 	if err != nil {
 		b.logger.Error("broadcaster marshal failed", zap.Error(err))
 		return
 	}
-	if err := b.client.Publish(ctx, roomChannel(roomID), data).Err(); err != nil {
-		b.logger.Warn("broadcaster publish failed", zap.String("room_id", roomID), zap.Error(err))
+	if err := b.client.Publish(ctx, scheduleChannel(scheduleID), data).Err(); err != nil {
+		b.logger.Warn("broadcaster publish failed", zap.String("schedule_id", scheduleID), zap.Error(err))
 	}	
 }
 
-func (b *RedisBroadcaster) Subscribe(ctx context.Context, roomID string) <-chan FrameNotification {
+func (b *RedisBroadcaster) Subscribe(ctx context.Context, scheduleID string) <-chan FrameNotification {
 	out := make(chan FrameNotification, 32)
 	go func() {
 		defer close(out)
-		pubsub := b.client.Subscribe(ctx, roomChannel(roomID))
+		pubsub := b.client.Subscribe(ctx, scheduleChannel(scheduleID))
 		defer pubsub.Close()
 
 		for {
@@ -59,7 +59,7 @@ func (b *RedisBroadcaster) Subscribe(ctx context.Context, roomID string) <-chan 
 					return // admin disconnect
 				}
 				b.logger.Warn("broadcaster receive failed", 
-					zap.String("roomId", roomID), 
+					zap.String("scheduleId", scheduleID), 
 					zap.Error(err),
 				)
 				return
@@ -83,29 +83,29 @@ func (b *RedisBroadcaster) Subscribe(ctx context.Context, roomID string) <-chan 
 }
 
 
-func roomEventsChannel(roomID string) string {
-	return "room:" + roomID + ":events"
+func scheduleEventsChannel(scheduleID string) string {
+	return "schedule:" + scheduleID + ":events"
 }
 
-func (b *RedisBroadcaster) PublishParticipantEvent(ctx context.Context, roomID string, event domain.ParticipantEvent) {
+func (b *RedisBroadcaster) PublishParticipantEvent(ctx context.Context, scheduleID string, event domain.ParticipantEvent) {
 	data, err := json.Marshal(event)
 	if err != nil {
 		b.logger.Error("participant event marshal failed", zap.Error(err))
 		return
 	}
-	if err := b.client.Publish(ctx, roomEventsChannel(roomID), data).Err(); err != nil {
+	if err := b.client.Publish(ctx, scheduleEventsChannel(scheduleID), data).Err(); err != nil {
 		b.logger.Warn("participant event published failed", 
-			zap.String("roomId", roomID), 
+			zap.String("scheduleId", scheduleID), 
 			zap.Error(err),
 		)
 	}
 }
 
-func (b *RedisBroadcaster) SubscribeEvents(ctx context.Context, roomID string) <-chan domain.ParticipantEvent {
+func (b *RedisBroadcaster) SubscribeEvents(ctx context.Context, scheduleID string) <-chan domain.ParticipantEvent {
 	out := make(chan domain.ParticipantEvent, 16)
 	go func() {
 		defer close(out)
-		pubsub := b.client.Subscribe(ctx, roomEventsChannel(roomID))
+		pubsub := b.client.Subscribe(ctx, scheduleEventsChannel(scheduleID))
 		defer pubsub.Close()
 
 		for {
@@ -114,7 +114,7 @@ func (b *RedisBroadcaster) SubscribeEvents(ctx context.Context, roomID string) <
 				if ctx.Err() != nil {
 					return
 				}
-				b.logger.Warn("participant event receive failed", zap.String("room_id", roomID), zap.Error(err))
+				b.logger.Warn("participant event receive failed", zap.String("schedule_id", scheduleID), zap.Error(err))
 				return
 			}
 
@@ -133,19 +133,19 @@ func (b *RedisBroadcaster) SubscribeEvents(ctx context.Context, roomID string) <
 	return out
 }
 
-func roomAlertsChannel(roomID string) string {
-	return "room:" + roomID + ":alerts"
+func scheduleAlertsChannel(scheduleID string) string {
+	return "schedule:" + scheduleID + ":alerts"
 }
 
-func (b *RedisBroadcaster) PublishAlertEvent(ctx context.Context, roomID string, alert domain.AlertEvent) error {
+func (b *RedisBroadcaster) PublishAlertEvent(ctx context.Context, scheduleID string, alert domain.AlertEvent) error {
 	data, err := json.Marshal(alert)
 	if err != nil {
 		b.logger.Error("alert marshal failed", zap.Error(err))
 		return fmt.Errorf("marshal alert: %w", err)
 	}
-	if err := b.client.Publish(ctx, roomAlertsChannel(roomID), data).Err(); err != nil {
+	if err := b.client.Publish(ctx, scheduleAlertsChannel(scheduleID), data).Err(); err != nil {
 		b.logger.Warn("alert publish failed", 
-			zap.String("roomId", roomID), 
+			zap.String("scheduleId", scheduleID), 
 			zap.Error(err),
 		)
 		return fmt.Errorf("redis publish: %w", err)
@@ -153,11 +153,11 @@ func (b *RedisBroadcaster) PublishAlertEvent(ctx context.Context, roomID string,
 	return nil
 }
 
-func (b *RedisBroadcaster) SubscribeAlerts(ctx context.Context, roomID string) <-chan domain.AlertEvent {
+func (b *RedisBroadcaster) SubscribeAlerts(ctx context.Context, scheduleID string) <-chan domain.AlertEvent {
 	out := make(chan domain.AlertEvent, 16)
 	go func() {
 		defer close(out)
-		pubsub := b.client.Subscribe(ctx, roomAlertsChannel(roomID))
+		pubsub := b.client.Subscribe(ctx, scheduleAlertsChannel(scheduleID))
 		defer pubsub.Close()
 		for {
 			msg, err := pubsub.ReceiveMessage(ctx)
@@ -179,18 +179,18 @@ func (b *RedisBroadcaster) SubscribeAlerts(ctx context.Context, roomID string) <
 	return out
 }
 
-// is the room has teacher subscribe (pubsub numsub)
-func (b *RedisBroadcaster) HasMonitor(ctx context.Context, roomID string) (bool, error) {
-	res, err := b.client.PubSubNumSub(ctx, roomChannel(roomID)).Result()
+// is the schedule has teacher subscribe (pubsub numsub)
+func (b *RedisBroadcaster) HasMonitor(ctx context.Context, scheduleID string) (bool, error) {
+	res, err := b.client.PubSubNumSub(ctx, scheduleChannel(scheduleID)).Result()
 	if err != nil {
 		return false, nil
 	}
-	return res[roomChannel(roomID)] > 0, nil
+	return res[scheduleChannel(scheduleID)] > 0, nil
 }
 
 
-func (b *RedisBroadcaster) PublishFrameURL(ctx context.Context, roomID, streamID, streamType, frameURL string, seq int64) {
-	b.Publish(ctx, roomID, FrameNotification{
+func (b *RedisBroadcaster) PublishFrameURL(ctx context.Context, scheduleID, streamID, streamType, frameURL string, seq int64) {
+	b.Publish(ctx, scheduleID, FrameNotification{
 		StreamID: streamID, 
 		StreamType: streamType,
 		FrameURL: frameURL,

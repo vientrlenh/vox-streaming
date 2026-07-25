@@ -129,6 +129,9 @@ func (c *Consumer) Run(ctx context.Context) error {
 				return nil
 			}
 			c.logger.Error("kafka fetch failed", zap.String("topic", c.topic), zap.Error(err))
+			if c.monitor != nil {
+				c.monitor.RecordFetchError(c.topic, c.groupID)
+			}
 
 			select {
 			case <-ctx.Done():

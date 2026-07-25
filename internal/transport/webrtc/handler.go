@@ -90,27 +90,25 @@ func NewHandler(
 
 func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	roomID := q.Get("roomId")
+	scheduleID := q.Get("scheduleId")
 	streamType := q.Get("streamType")
 	token := q.Get("token")
 
-	claims, err := h.validator.Validate(token)
+	claims, err := h.validator.ValidateStream(token)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	
+	if !claims.CanAccess(scheduleID, streamType) {
+		http.Error(w, "forbidden: wrong schedule or stream type", http.StatusForbidden)
+		return
+	}
 
-	if !claims.IsStudent() {
-		http.Error(w, "forbbiden: use /ws/monitor for monitoring", http.StatusForbidden)
-		return
-	}
-	if len(claims.RoomIDs) != 1 || claims.RoomIDs[0] != roomID || !claims.CanStream(streamType) {
-		http.Error(w, "forbidden: wrong room", http.StatusForbidden)
-		return
-	}
+	participantID := claims.CandidateID
 
 	if h.examClient != nil {
-		allowed, reason, err := h.examClient.ValidateAccess(r.Context(), roomID, claims.UserID, streamType)
+		allowed, reason, err := h.examClient.ValidateAccess(r.Context(), scheduleID, participantID, claims.SessionID, streamType)
 		if err != nil {
 			h.logger.Warn("exam validation unavaiable, denying", zap.Error(err))
 			http.Error(w, "exam service unavaiable", http.StatusServiceUnavailable)
@@ -119,7 +117,7 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 		if !allowed {
 			h.logger.Warn("exam access denined", 
 				zap.String("reason", reason), 
-				zap.String("participantId", claims.UserID),
+				zap.String("participantId", participantID),
 			)
 			http.Error(w, reason, http.StatusForbidden)
 			return
@@ -136,7 +134,7 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rawConn.Close()
 
-	peer, err := NewPeer(h.peerCfg, roomID, claims.SessionID, claims.UserID, streamType, h.streamUseCase, h.monitorUseCase, h.storage, h.segments, h.logger)
+	peer, err := NewPeer(h.peerCfg, scheduleID, claims.SessionID, participantID, streamType, h.streamUseCase, h.monitorUseCase, h.storage, h.segments, h.logger)
 	if err != nil {
 		h.logger.Error("peer creation failed", zap.Error(err))
 		_ = rawConn.WriteJSON(map[string]string{
@@ -146,17 +144,17 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if old := h.sessions.Replace(roomID, claims.UserID, streamType, peer); old != nil {
+	if old := h.sessions.Replace(scheduleID, participantID, streamType, peer); old != nil {
 		old.Close() // explicit close, clear ownership
 		h.logger.Info("replaced existing peer on reconnect", 
-			zap.String("room_id", roomID), 
-			zap.String("participant_id", claims.UserID), 
-			zap.String("stream_type", streamType),
+			zap.String("scheduleId", scheduleID), 
+			zap.String("participantId", participantID), 
+			zap.String("streamType", streamType),
 		)
 	}
 
 	defer func() {
-		h.sessions.RemoveIfSame(roomID, claims.UserID, streamType, peer)
+		h.sessions.RemoveIfSame(scheduleID, participantID, streamType, peer)
 		peer.Close()
 	}()
 
@@ -176,21 +174,26 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	roomID := q.Get("roomId")
+	scheduleID := q.Get("scheduleId")
 	token := q.Get("token")
 
-	if roomID == "" {
-		http.Error(w, "missing roomId", http.StatusBadRequest)
+	if scheduleID == "" {
+		http.Error(w, "missing scheduleId", http.StatusBadRequest)
 		return
 	}
 
-	claims, err := h.validator.Validate(token)
+	claims, err := h.validator.ValidateMonitor(token)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if !claims.CanMonitorRoom(roomID) {
+	if !claims.CanMonitorSchedule(scheduleID) {
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	if claims.ExpiresAt == nil || !claims.ExpiresAt.After(time.Now()) {
+		http.Error(w, "token expired", http.StatusUnauthorized)
 		return
 	}
 
@@ -202,26 +205,32 @@ func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 	defer rawConn.Close()
 
 	// context riêng để cancel cả 2 subscription khi monitor disconnect
-	ctx, cancel := context.WithCancel(r.Context())
+	
+	if claims.ExpiresAt == nil {
+		http.Error(w, "invalid token expiration", http.StatusUnauthorized)
+		return
+	}
+
+	ctx, cancel := context.WithDeadline(r.Context(), claims.ExpiresAt.Time)
 	defer cancel()
 
 	conn := &safeConn{conn: rawConn}
 
-	h.logger.Info("monitor connected", zap.String("roomId", roomID), zap.String("userId", claims.UserID))
+	h.logger.Info("monitor connected", zap.String("scheduleId", scheduleID), zap.String("userId", claims.UserID))
 
 	// gửi snapshot ngay khi kết nối - monitor thấy ngay khi ai đó đang online
-	snapshot, err := h.monitorUseCase.GetRoomSnapshot(ctx, roomID)
+	snapshot, err := h.monitorUseCase.GetScheduleSnapshot(ctx, scheduleID)
 	if err != nil {
-		h.logger.Error("get room snapshot failed", zap.String("roomId", roomID), zap.Error(err))
+		h.logger.Error("get schedule snapshot failed", zap.String("scheduleId", scheduleID), zap.Error(err))
 	}
 	_ = conn.WriteJSON(MonitorMessage{
 		Type: "snapshot", 
 		Streams: snapshot,
 	})
 
-	frameCh := h.broadcaster.Subscribe(ctx, roomID)
-	eventCh := h.monitorUseCase.SubscribeEvents(ctx, roomID)
-	alertCh := h.monitorUseCase.SubscribeAlerts(ctx, roomID)
+	frameCh := h.broadcaster.Subscribe(ctx, scheduleID)
+	eventCh := h.monitorUseCase.SubscribeEvents(ctx, scheduleID)
+	alertCh := h.monitorUseCase.SubscribeAlerts(ctx, scheduleID)
 
 	// Read goroutine dùng để detect disconnect
 	go func() {
@@ -290,23 +299,23 @@ func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) GetActiveRooms(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) GetActiveSchedules(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
-	claims, err := h.validator.Validate(token)
+	claims, err := h.validator.ValidateMonitor(token)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	rooms, err := h.monitorUseCase.GetActiveRooms(r.Context(), claims.RoomIDs)
+	schedules, err := h.monitorUseCase.GetActiveSchedules(r.Context(), claims.ScheduleIDs)
 	if err != nil {
-		h.logger.Error("get active rooms failed", zap.Error(err))
+		h.logger.Error("get active schedules failed", zap.Error(err))
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(rooms)
+	json.NewEncoder(w).Encode(schedules)
 }
 
 func (h *Handler) runSignaling(conn *safeConn, peer *Peer) {

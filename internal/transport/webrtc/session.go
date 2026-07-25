@@ -3,7 +3,7 @@ package webrtc
 import "sync"
 
 type sessionKey struct {
-	roomID        string
+	scheduleID        string
 	participantID string
 	streamType    string
 }
@@ -19,9 +19,9 @@ func NewSessionManager() *SessionManager {
 	}
 }
 
-func (m *SessionManager) Add(roomID, participantID, streamType string, p *Peer) {
+func (m *SessionManager) Add(scheduleID, participantID, streamType string, p *Peer) {
 	key := sessionKey{
-		roomID:        roomID,
+		scheduleID:        scheduleID,
 		participantID: participantID,
 		streamType:    streamType,
 	}
@@ -34,9 +34,9 @@ func (m *SessionManager) Add(roomID, participantID, streamType string, p *Peer) 
 	m.sessions[key] = p
 }
 
-func (m *SessionManager) Replace(roomID, participantID, streamType string, p *Peer) *Peer {
+func (m *SessionManager) Replace(scheduleID, participantID, streamType string, p *Peer) *Peer {
 	key := sessionKey{
-		roomID: roomID, 
+		scheduleID: scheduleID, 
 		participantID: participantID,
 		streamType: streamType,
 	}
@@ -47,9 +47,9 @@ func (m *SessionManager) Replace(roomID, participantID, streamType string, p *Pe
 	return old
 }
 
-func (m *SessionManager) RemoveIfSame(roomID, participantID, streamType string, p *Peer) {
+func (m *SessionManager) RemoveIfSame(scheduleID, participantID, streamType string, p *Peer) {
 	key := sessionKey{
-		roomID: roomID, 
+		scheduleID: scheduleID, 
 		participantID: participantID,
 		streamType: streamType,
 	}
@@ -60,22 +60,22 @@ func (m *SessionManager) RemoveIfSame(roomID, participantID, streamType string, 
 	}
 }
 
-func (m *SessionManager) Remove(roomID, participantID, streamType string) {
+func (m *SessionManager) Remove(scheduleID, participantID, streamType string) {
 	m.mu.Lock()
 	delete(m.sessions, sessionKey{
-		roomID:        roomID,
+		scheduleID:        scheduleID,
 		participantID: participantID,
 		streamType:    streamType,
 	})
 	m.mu.Unlock()
 }
 
-func (m *SessionManager) RoomPeers(roomID string) []*Peer {
+func (m *SessionManager) SchedulePeers(scheduleID string) []*Peer {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var out []*Peer
 	for k, p := range m.sessions {
-		if k.roomID == roomID {
+		if k.scheduleID == scheduleID {
 			out = append(out, p)
 		}
 	}

@@ -74,13 +74,14 @@ func (c *ExamClient) Ping(_ context.Context) error {
 	}
 }
 
-func (c *ExamClient) ValidateAccess(ctx context.Context, roomID, participantID, streamType string) (allowed bool, reason string, err error) {
+func (c *ExamClient) ValidateAccess(ctx context.Context, scheduleID, participantID, sessionID, streamType string) (allowed bool, reason string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
 	resp, err := c.client.ValidateAccess(ctx, &examv1.ValidateAccessRequest{
-		RoomId: roomID, 
-		ParticipantId: participantID, 
+		ScheduleId: scheduleID, 
+		CandidateId: participantID, 
+		ExamSessionId: sessionID,
 		StreamType: streamType,
 	})
 	if err != nil {
@@ -95,13 +96,13 @@ func (c *ExamClient) Close() {
 	}
 }
 
-func (c *ExamClient) UpdateRecording(ctx context.Context, streamID, roomID, recordingURL string, durationSecs int64) error {
+func (c *ExamClient) UpdateRecording(ctx context.Context, streamID, scheduleID, recordingURL string, durationSecs int64) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	resp, err := c.client.UpdateRecording(ctx, &examv1.UpdateRecordingRequest{
 		StreamId: streamID, 
-		RoomId: roomID, 
+		ScheduleId: scheduleID, 
 		RecordingUrl: recordingURL, 
 		DurationSecs: durationSecs,
 	})

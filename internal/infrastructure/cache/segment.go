@@ -17,6 +17,7 @@ const segmentTTL = 24 * time.Hour
 type SegmentMeta struct {
 	Seq        int64     `json:"seq"`
 	S3Key      string    `json:"s3Key"`
+	SHA256     string    `json:"sha256"`
 	StartedAt  time.Time `json:"startedAt"`
 	EndedAt    time.Time `json:"endedAt"`
 	SizeBytes  int64     `json:"sizeBytes"`
@@ -44,6 +45,22 @@ func (r *SegmentRegistry) Add(ctx context.Context, streamID string, meta Segment
 	pipe.Expire(ctx, key, segmentTTL)
 	_, err = pipe.Exec(ctx)
 	return err
+}
+
+func (r *SegmentRegistry) Get(ctx context.Context, streamID string, seq int64) (*SegmentMeta, error) {
+	value, err := r.client.HGet(ctx, segmentKey(streamID), strconv.FormatInt(seq, 10)).Result()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var meta SegmentMeta
+	if err := json.Unmarshal([]byte(value), &meta); err != nil {
+		return nil, err
+	}
+	return &meta, nil
 }
 
 func (r *SegmentRegistry) List(ctx context.Context, streamID string) ([]SegmentMeta, error) {

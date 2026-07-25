@@ -22,11 +22,12 @@ import (
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/queue"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
 	"github.com/vientrlenh/vox-streaming/internal/recorder"
-	grpcclient "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
-	grpctransport "github.com/vientrlenh/vox-streaming/internal/transport/grpc/server"
+	grpcClient "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
+	grpcServer "github.com/vientrlenh/vox-streaming/internal/transport/grpc/server"
 	httpRoute "github.com/vientrlenh/vox-streaming/internal/transport/http"
-	segmenttransport "github.com/vientrlenh/vox-streaming/internal/transport/segment"
-	webrtctransport "github.com/vientrlenh/vox-streaming/internal/transport/webrtc"
+	recordHandler "github.com/vientrlenh/vox-streaming/internal/handler/recording"
+	segmentHandler "github.com/vientrlenh/vox-streaming/internal/handler/segment"
+	webrtcTransport "github.com/vientrlenh/vox-streaming/internal/transport/webrtc"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
 	"github.com/vientrlenh/vox-streaming/pkg/auth"
 	"go.uber.org/zap"
@@ -90,7 +91,7 @@ func main() {
 	if raw := os.Getenv("WEBRTC_NAT_1TO1_IP"); raw != "" {
 		natIPs = strings.Split(raw, ",")
 	}
-	webrtcAPI, webrtcAPIClose, err := webrtctransport.NewWebRTCAPI(webrtctransport.ICEConfig{
+	webrtcAPI, webrtcAPIClose, err := webrtcTransport.NewWebRTCAPI(webrtcTransport.ICEConfig{
 		UDPPort:    webrtcUDPPort,
 		NAT1To1IPs: natIPs,
 	}, logger)
@@ -117,19 +118,19 @@ func main() {
 	defer redisClient.Close()
 
 	sessionRegistry := cache.NewSessionRegistry(redisClient)
-	broadCaster := webrtctransport.NewRedisBroadcaster(redisClient, logger)
+	broadCaster := webrtcTransport.NewRedisBroadcaster(redisClient, logger)
 
 	streamUseCase := usecase.NewStreamUseCase(publisher, sessionRegistry, logger)
 	monitorUseCase := usecase.NewMonitorUseCase(sessionRegistry, broadCaster, broadCaster, publisher, logger)
 
-	alertServer := grpctransport.NewAlertServer(monitorUseCase, logger)
+	alertServer := grpcServer.NewAlertServer(monitorUseCase, logger)
 
 	grpcAddr := os.Getenv("GRPC_ADDR")
 	if grpcAddr == "" {
 		grpcAddr = ":9091"
 	}
 
-	grpcServer, err := grpctransport.NewServer(grpctransport.ServerConfig{
+	grpcServer, err := grpcServer.NewServer(grpcServer.ServerConfig{
 		Addr:     grpcAddr,
 		CertFile: os.Getenv("GRPC_CERT_FILE"),
 		KeyFile:  os.Getenv("GRPC_KEY_FILE"),
@@ -140,7 +141,7 @@ func main() {
 		logger.Fatal("grpc server create failed", zap.Error(err))
 	}
 
-	examClient, err := grpcclient.NewExamClient(grpcclient.ExamClientConfig{
+	examClient, err := grpcClient.NewExamClient(grpcClient.ExamClientConfig{
 		Addr:   os.Getenv("EXAM_SERVICE_GRPC_ADDR"),
 		CAFile: os.Getenv("EXAM_SERVICE_CA_FILE"),
 		Token:  os.Getenv("GRPC_SERVICE_TOKEN"),
@@ -167,11 +168,12 @@ func main() {
 		assemblyGraceSecs = 90
 	}
 	assemblerUseCase := usecase.NewAssemblerUseCase(
-		storageClient, examClient, segmentRegistry,
+		storageClient, segmentRegistry, sessionRegistry, publisher,
 		time.Duration(assemblyGraceSecs)*time.Second,
 		logger,
 	)
-	segmentHandler := segmenttransport.NewSegmentHandler(segmentUseCase, assemblerUseCase, jwtValidator, logger)
+	segmentHandler := segmentHandler.NewSegmentHandler(segmentUseCase, publisher, jwtValidator, sessionRegistry, logger)
+	recordingHandler := recordHandler.NewHandler(storageClient, os.Getenv("GRPC_SERVICE_TOKEN"), logger)
 
 	ffmpegIngestOpts := buildFFmpegIngestOptions(logger)
 
@@ -187,13 +189,13 @@ func main() {
 		logger,
 	)
 
-	webrtcHandler := webrtctransport.NewHandler(
-		webrtctransport.PeerConfig{
+	webrtcHandler := webrtcTransport.NewHandler(
+		webrtcTransport.PeerConfig{
 			API:           webrtcAPI,
 			ICEServers:    iceServers,
 			FrameInterval: time.Duration(frameIntervalSecs) * time.Second,
 			TempDir:       tempDir,
-			AIRelay: webrtctransport.AIRelayOptions{
+			AIRelay: webrtcTransport.AIRelayOptions{
 				Enabled:   os.Getenv("AI_RELAY_ENABLED") == "true",
 				URL:       os.Getenv("AI_WEBRTC_URL"),
 				QueueSize: aiRelayQueueSize,
@@ -207,8 +209,8 @@ func main() {
 		jwtValidator,
 		broadCaster,
 		examClient,
-		storageClient, 
-		segmentRegistry, 
+		storageClient,
+		segmentRegistry,
 	)
 
 	addr := os.Getenv("WEBRTC_ADDR")
@@ -217,9 +219,9 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	c := cors.New(cors.Options{
-		AllowedOrigins: allowedOrigins, 
-		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"}, 
-		AllowedHeaders: []string{"Content-Type", "Authorization"}, 
+		AllowedOrigins:   allowedOrigins,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-Segment-SHA256"},
 		AllowCredentials: true,
 	})
 	corsHandler := c.Handler(mux)
@@ -227,7 +229,7 @@ func main() {
 	srv := &http.Server{Addr: addr, Handler: corsHandler}
 
 	go func() {
-		httpRoute.Register(mux, webrtcHandler, segmentHandler)
+		httpRoute.Register(mux, webrtcHandler, segmentHandler, recordingHandler)
 		logger.Info("webrtc signaling server started", zap.String("addr", addr))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("webrtc server error", zap.Error(err))
@@ -238,7 +240,9 @@ func main() {
 		domain.TopicFrameReady,
 		domain.TopicStreamStarted,
 		domain.TopicStreamEnded,
-		domain.TopicRoomClosed,
+		domain.TopicRecordingAssemblyRequested,
+		domain.TopicRecordingPartChanged,
+		domain.TopicScheduleClosed,
 	}
 
 	dlqWriter, err := queue.NewDLQWriter(kafkaCfg, mainTopics, logger)
@@ -276,8 +280,10 @@ func main() {
 		},
 	)
 
+	streamStartedCfg := kafkaCfg
+	streamStartedCfg.GroupID = kafkaCfg.GroupID + ".stream-started"
 	streamStartedConsumer := queue.NewConsumer(
-		kafkaCfg,
+		streamStartedCfg,
 		domain.TopicStreamStarted,
 		handleStreamStarted(logger, monitorUseCase),
 		logger,
@@ -289,8 +295,11 @@ func main() {
 			MaxDLQFails:        10,
 		},
 	)
+
+	streamEndedCfg := kafkaCfg
+	streamEndedCfg.GroupID = kafkaCfg.GroupID + ".stream-ended"
 	streamEndedConsumer := queue.NewConsumer(
-		kafkaCfg,
+		streamEndedCfg,
 		domain.TopicStreamEnded,
 		handleStreamEnded(logger, monitorUseCase),
 		logger,
@@ -320,11 +329,25 @@ func main() {
 		},
 	)
 
+	recordingAssemblerCfg := assemblerKafkaCfg
+	recordingAssemblerCfg.GroupID = assemblerKafkaCfg.GroupID + ".recording-requested"
+	recordingAssemblerConsumer := queue.NewConsumer(
+		recordingAssemblerCfg,
+		domain.TopicRecordingAssemblyRequested,
+		handleRecordingAssembly(assemblerUseCase),
+		logger,
+		&queue.ConsumerOptions{
+			MaxRetries: 10, RetryDelay: 5 * time.Second, DLQ: dlqWriter,
+			CommitOnDLQFailure: false, MaxDLQFails: 3,
+		},
+	)
+
 	allConsumers := []*queue.Consumer{
 		frameConverterConsumer,
 		streamStartedConsumer,
 		streamEndedConsumer,
 		assemblerConsumer,
+		recordingAssemblerConsumer,
 	}
 	alertConfigs := queue.BuildAlertConfigs(
 		allConsumers,
@@ -350,6 +373,7 @@ func main() {
 	streamStartedConsumer.SetMonitor(monitor)
 	streamEndedConsumer.SetMonitor(monitor)
 	assemblerConsumer.SetMonitor(monitor)
+	recordingAssemblerConsumer.SetMonitor(monitor)
 
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
@@ -377,6 +401,11 @@ func main() {
 			logger.Error("assembler consumer error", zap.Error(err))
 		}
 	}()
+	go func() {
+		if err := recordingAssemblerConsumer.Run(runCtx); err != nil {
+			logger.Error("recording assembler consumer error", zap.Error(err))
+		}
+	}()
 
 	go monitor.Run(runCtx)
 
@@ -401,6 +430,7 @@ func main() {
 		streamStartedConsumer.Close()
 		streamEndedConsumer.Close()
 		assemblerConsumer.Close()
+		recordingAssemblerConsumer.Close()
 		publisher.Close()
 		dlqWriter.Close()
 		grpcServer.Shutdown()
@@ -425,11 +455,11 @@ func handleStreamStarted(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.H
 		logger.Info(
 			"stream started",
 			zap.String("stream_id", event.StreamID),
-			zap.String("room_id", event.RoomID),
+			zap.String("schedule_id", event.ScheduleID),
 			zap.String("stream_type", event.StreamType),
 		)
 
-		mu.NotifyJoined(ctx, event.RoomID, event.ParticipantID, event.StreamID, event.StreamType)
+		mu.NotifyJoined(ctx, event.ScheduleID, event.ParticipantID, event.StreamID, event.StreamType)
 
 		return nil
 	}
@@ -449,7 +479,7 @@ func handleStreamEnded(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.Han
 			zap.Int64("durationSecs", event.Duration),
 		)
 
-		mu.NotifyLeft(ctx, event.RoomID, event.ParticipantID, event.StreamID, event.StreamType)
+		mu.NotifyLeft(ctx, event.ScheduleID, event.ParticipantID, event.StreamID, event.StreamType)
 
 		return nil
 	}
@@ -496,8 +526,7 @@ func parseAllowedOrigins() []string {
 	return origins
 }
 
-
-func buildFFmpegIngestOptions(logger *zap.Logger) webrtctransport.FFmpegIngestOptions {
+func buildFFmpegIngestOptions(logger *zap.Logger) webrtcTransport.FFmpegIngestOptions {
 	rangeStart, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_PORT_RANGE_START"))
 	if rangeStart == 0 {
 		rangeStart = 40000
@@ -543,7 +572,7 @@ func buildFFmpegIngestOptions(logger *zap.Logger) webrtctransport.FFmpegIngestOp
 		zap.Int("reorderQueueSize", reorderQueueSize),
 		zap.Int("maxDelayMs", maxDelayMs),
 	)
-	return webrtctransport.FFmpegIngestOptions{
+	return webrtcTransport.FFmpegIngestOptions{
 		Allocator:          alloc,
 		RecordSem:          make(chan struct{}, maxConcurrent),
 		SegmentSeconds:     segmentSeconds,
@@ -589,7 +618,17 @@ func handleAssembly(uc *usecase.AssemblerUseCase) queue.HandlerFunc {
 		if err := json.Unmarshal(msg.Value, &event); err != nil {
 			return fmt.Errorf("unmarshal stream ended for assembly: %w", err)
 		}
-		return uc.OnStreamEnded(ctx, event.RoomID, event.SessionID, event.StreamID)
+		return uc.OnStreamEnded(ctx, event)
+	}
+}
+
+func handleRecordingAssembly(uc *usecase.AssemblerUseCase) queue.HandlerFunc {
+	return func(ctx context.Context, msg kafka.Message) error {
+		var event domain.RecordingAssemblyRequestedEvent
+		if err := json.Unmarshal(msg.Value, &event); err != nil {
+			return fmt.Errorf("unmarshal recording assembly request: %w", err)
+		}
+		return uc.AssembleRequested(ctx, event)
 	}
 }
 

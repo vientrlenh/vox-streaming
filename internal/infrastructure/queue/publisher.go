@@ -23,7 +23,9 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 		domain.TopicFrameReady,
 		domain.TopicStreamStarted,
 		domain.TopicStreamEnded,
-		domain.TopicRoomClosed, 
+		domain.TopicRecordingAssemblyRequested,
+		domain.TopicRecordingPartChanged,
+		domain.TopicScheduleClosed,
 		domain.TopicAlertRaised,
 	}
 
@@ -48,7 +50,7 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 		w := &kafka.Writer{
 			Addr:         kafka.TCP(cfg.Brokers...),
 			Topic:        topic,
-			Balancer:     &kafka.Hash{}, // đảm bảo ordering per room khi cùng room ID và cùng partition
+			Balancer:     &kafka.Hash{}, // make sure per schedule ordering when scheduleID matches and partition matches
 			BatchSize:    cfg.BatchSize,
 			BatchTimeout: cfg.BatchTimeout,
 			Async:        async,
@@ -83,23 +85,31 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 }
 
 func (p *Publisher) PublishFrameReady(ctx context.Context, event domain.FrameReadyEvent) error {
-	return p.publish(ctx, domain.TopicFrameReady, event.RoomID, event)
+	return p.publish(ctx, domain.TopicFrameReady, event.ScheduleID, event)
 }
 
 func (p *Publisher) PublishStreamStarted(ctx context.Context, event domain.StreamStartedEvent) error {
-	return p.publish(ctx, domain.TopicStreamStarted, event.RoomID, event)
+	return p.publish(ctx, domain.TopicStreamStarted, event.ScheduleID, event)
 }
 
 func (p *Publisher) PublishStreamEnded(ctx context.Context, event domain.StreamEndedEvent) error {
-	return p.publish(ctx, domain.TopicStreamEnded, event.RoomID, event)
+	return p.publish(ctx, domain.TopicStreamEnded, event.ScheduleID, event)
 }
 
-func (p *Publisher) PublishRoomClosed(ctx context.Context, event domain.RoomClosedEvent) error {
-	return p.publish(ctx, domain.TopicRoomClosed, event.RoomID, event)
+func (p *Publisher) PublishScheduleClosed(ctx context.Context, event domain.ScheduleClosedEvent) error {
+	return p.publish(ctx, domain.TopicScheduleClosed, event.ScheduleID, event)
+}
+
+func (p *Publisher) PublishRecordingAssemblyRequested(ctx context.Context, event domain.RecordingAssemblyRequestedEvent) error {
+	return p.publish(ctx, domain.TopicRecordingAssemblyRequested, event.StreamID, event)
+}
+
+func (p *Publisher) PublishRecordingPartChanged(ctx context.Context, event domain.RecordingPartChangedEvent) error {
+	return p.publish(ctx, domain.TopicRecordingPartChanged, event.StreamID, event)
 }
 
 func (p *Publisher) PublishAlertRaised(ctx context.Context, event domain.AlertRaisedEvent) error {
-	return p.publish(ctx, domain.TopicAlertRaised, event.RoomID, event)
+	return p.publish(ctx, domain.TopicAlertRaised, event.ScheduleID, event)
 }
 
 func (p *Publisher) publish(ctx context.Context, topic, key string, payload any) error {
@@ -113,13 +123,19 @@ func (p *Publisher) publish(ctx context.Context, topic, key string, payload any)
 		return fmt.Errorf("kafka publish: no writer for topic %q", topic)
 	}
 
+	headers := []kafka.Header{
+		{Key: "content-type", Value: []byte("application/json")},
+		{Key: "produced-at", Value: []byte(time.Now().UTC().Format(time.RFC3339))},
+	}
+	if topic == domain.TopicRecordingPartChanged {
+		// Spring's JSON consumer uses this standard type header to deserialize
+		// events produced by kafka-go into a generic map.
+		headers = append(headers, kafka.Header{Key: "__TypeId__", Value: []byte("java.util.LinkedHashMap")})
+	}
 	msg := kafka.Message{
-		Key:   []byte(key),
-		Value: data,
-		Headers: []kafka.Header{
-			{Key: "content-type", Value: []byte("application/json")},
-			{Key: "produced-at", Value: []byte(time.Now().UTC().Format(time.RFC3339))},
-		},
+		Key:     []byte(key),
+		Value:   data,
+		Headers: headers,
 	}
 
 	start := time.Now()

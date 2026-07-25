@@ -96,7 +96,7 @@ func (st *ffmpegIngestState) forwardAudio(raw []byte) {
 
 type Peer struct {
 	pc            *webrtc.PeerConnection
-	roomID        string
+	scheduleID        string
 	sessionID 	  string
 	participantID string
 	streamID      string
@@ -131,7 +131,7 @@ type Peer struct {
 
 func NewPeer(
 	cfg PeerConfig,
-	roomID, sessionID, participantID, streamType string,
+	scheduleID, sessionID, participantID, streamType string,
 	streamUseCase *usecase.StreamUseCase, 
 	monitorUseCase *usecase.MonitorUseCase,
 	storage *storage.Client, 
@@ -159,7 +159,7 @@ func NewPeer(
 	streamID := streamIDUuid.String()
 	p := &Peer{
 		pc:            pc,
-		roomID:        roomID,
+		scheduleID:        scheduleID,
 		participantID: participantID,
 		sessionID: sessionID,
 		streamID:      streamID,
@@ -175,7 +175,7 @@ func NewPeer(
 		tempDir:         cfg.TempDir,
 		done:          make(chan struct{}),
 		logger: logger.With(
-			zap.String("roomId", roomID),
+			zap.String("scheduleId", scheduleID),
 			zap.String("participantId", participantID),
 			zap.String("streamId", streamID),
 			zap.String("streamType", streamType),
@@ -198,7 +198,7 @@ func (p *Peer) setupCallbacks() {
 			p.startOnce.Do(func() {
 				ctx := context.Background()
 				if err := p.streamUseCase.NotifyStreamStarted(
-					ctx, p.roomID, p.sessionID, p.participantID, p.streamID, p.streamType,
+					ctx, p.scheduleID, p.sessionID, p.participantID, p.streamID, p.streamType,
 				); err != nil {
 					p.logger.Error("notify stream started failed", zap.Error(err))
 				}
@@ -463,7 +463,7 @@ func (p *Peer) uploadFFmpegSegmentOnce(ctx context.Context, path string, seq int
 		return "", fmt.Errorf("open segment: %w", err)
 	}
 	defer f.Close()
-	return p.storage.UploadFFmpegSegment(attemptCtx, p.roomID, p.sessionID, p.streamID, seq, f)
+	return p.storage.UploadFFmpegSegment(attemptCtx, p.scheduleID, p.sessionID, p.streamID, seq, f)
 }
 
 func (p *Peer) scheduleClose(d time.Duration) {
@@ -515,7 +515,7 @@ func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
 		},
 			track.Codec().RTPCodecCapability,
 			RelayMeta{
-				RoomID:        p.roomID,
+				ScheduleID:        p.scheduleID,
 				ParticipantID: p.participantID,
 				StreamID:      p.streamID,
 				StreamType:    p.streamType,
@@ -568,7 +568,7 @@ func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
 				defer capturing.Store(false)
 				frameURL := p.captureAndUpload(ctx, fe, s)
 				if err := p.streamUseCase.PublishFrame(
-					ctx, p.roomID, p.sessionID, p.participantID, p.streamID, p.streamType, frameURL, s,
+					ctx, p.scheduleID, p.sessionID, p.participantID, p.streamID, p.streamType, frameURL, s,
 				); err != nil {
 					p.logger.Warn("publish frame failed",
 						zap.Int64("seq", s),
@@ -599,7 +599,7 @@ func (p *Peer) captureAndUpload(ctx context.Context, fe *recorder.FrameExtractor
 		return ""
 	}
 
-	key, err := p.storage.UploadFrame(ctx, p.roomID, p.streamID, seq, h264Frame)
+	key, err := p.storage.UploadFrame(ctx, p.scheduleID, p.streamID, seq, h264Frame)
 	if err != nil {
 		p.logger.Warn("frame upload failed", 
 			zap.Int64("seq", seq),
@@ -791,7 +791,7 @@ func (p *Peer) close() {
 			if err := p.monitorUseCase.PublishAlert(
 				ctx, domain.AlertEvent{
 					Source: domain.AlertSourceStreaming,
-					RoomID: p.roomID,
+					ScheduleID: p.scheduleID,
 					ParticipantID: p.participantID,
 					StreamID: p.streamID,
 					StreamType: p.streamType,
@@ -807,7 +807,7 @@ func (p *Peer) close() {
 			if err := p.monitorUseCase.PublishAlert(
 				ctx, domain.AlertEvent{
 					Source: domain.AlertSourceStreaming, 
-					RoomID: p.roomID, 
+					ScheduleID: p.scheduleID, 
 					ParticipantID: p.participantID, 
 					StreamID: p.streamID, 
 					StreamType: p.streamType, 
@@ -820,14 +820,14 @@ func (p *Peer) close() {
 			}
 		}
 		if err := p.streamUseCase.NotifyStreamEnded(
-			ctx, p.roomID, p.sessionID, p.participantID, p.streamID, p.streamType, segmentKeys, duration,
+			ctx, p.scheduleID, p.sessionID, p.participantID, p.streamID, p.streamType, segmentKeys, duration,
 		); err != nil {
 			p.logger.Error("notify stream ended failed", zap.Error(err))
 		}
 		if err := p.pc.Close(); err != nil {
 			p.logger.Error("stream end close failed", 
 				zap.String("streamId", p.streamID), 
-				zap.String("roomId", p.roomID), 
+				zap.String("scheduleId", p.scheduleID), 
 				zap.Error(err),
 			)
 		}

@@ -23,7 +23,7 @@ const (
 
 type PushAlertRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	RoomId        string                 `protobuf:"bytes,1,opt,name=roomId,proto3" json:"roomId,omitempty"`
+	ScheduleId    string                 `protobuf:"bytes,1,opt,name=scheduleId,proto3" json:"scheduleId,omitempty"`
 	ParticipantId string                 `protobuf:"bytes,2,opt,name=participantId,proto3" json:"participantId,omitempty"`
 	StreamId      string                 `protobuf:"bytes,3,opt,name=streamId,proto3" json:"streamId,omitempty"`
 	AlertType     string                 `protobuf:"bytes,4,opt,name=alertType,proto3" json:"alertType,omitempty"`
@@ -67,9 +67,9 @@ func (*PushAlertRequest) Descriptor() ([]byte, []int) {
 	return file_alert_v1_alert_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *PushAlertRequest) GetRoomId() string {
+func (x *PushAlertRequest) GetScheduleId() string {
 	if x != nil {
-		return x.RoomId
+		return x.ScheduleId
 	}
 	return ""
 }
@@ -185,9 +185,11 @@ var File_alert_v1_alert_proto protoreflect.FileDescriptor
 
 const file_alert_v1_alert_proto_rawDesc = "" +
 	"\n" +
-	"\x14alert/v1/alert.proto\x12\balert.v1\"\xc0\x02\n" +
-	"\x10PushAlertRequest\x12\x16\n" +
-	"\x06roomId\x18\x01 \x01(\tR\x06roomId\x12$\n" +
+	"\x14alert/v1/alert.proto\x12\balert.v1\"\xc8\x02\n" +
+	"\x10PushAlertRequest\x12\x1e\n" +
+	"\n" +
+	"scheduleId\x18\x01 \x01(\tR\n" +
+	"scheduleId\x12$\n" +
 	"\rparticipantId\x18\x02 \x01(\tR\rparticipantId\x12\x1a\n" +
 	"\bstreamId\x18\x03 \x01(\tR\bstreamId\x12\x1c\n" +
 	"\talertType\x18\x04 \x01(\tR\talertType\x12\x1e\n" +

@@ -6,17 +6,46 @@ import (
 )
 
 const (
-	TopicFrameReady    = "exam.frame.ready"
-	TopicStreamStarted = "exam.stream.started"
-	TopicStreamEnded   = "exam.stream.ended"
-	TopicRoomClosed    = "exam.room.closed"
-	TopicAlertRaised = "exam.alert.raised"
+	TopicFrameReady                 = "exam.frame.ready"
+	TopicStreamStarted              = "exam.stream.started"
+	TopicStreamEnded                = "exam.stream.ended"
+	TopicRecordingAssemblyRequested = "exam.recording.assembly.requested"
+	TopicRecordingPartChanged       = "exam.recording.part.changed"
+	TopicScheduleClosed             = "exam.schedule.closed"
+	TopicAlertRaised                = "exam.alert.raised"
 )
+
+type RecordingAssemblyRequestedEvent struct {
+	EventID       string    `json:"eventId"`
+	StreamID      string    `json:"streamId"`
+	ScheduleID    string    `json:"scheduleId"`
+	SessionID     string    `json:"sessionId"`
+	ParticipantID string    `json:"participantId"`
+	StreamType    string    `json:"streamType"`
+	Source        string    `json:"source"`
+	RequestedAt   time.Time `json:"requestedAt"`
+}
+
+type RecordingPartChangedEvent struct {
+	EventID       string    `json:"eventId"`
+	StreamID      string    `json:"streamId"`
+	ScheduleID    string    `json:"scheduleId"`
+	SessionID     string    `json:"sessionId"`
+	ParticipantID string    `json:"participantId"`
+	StreamType    string    `json:"streamType"`
+	Source        string    `json:"source"`
+	Status        string    `json:"status"`
+	ObjectKey     string    `json:"objectKey,omitempty"`
+	DurationSecs  int64     `json:"durationSecs,omitempty"`
+	HasGaps       bool      `json:"hasGaps"`
+	ErrorMessage  string    `json:"errorMessage,omitempty"`
+	OccurredAt    time.Time `json:"occurredAt"`
+}
 
 type FrameReadyEvent struct {
 	EventID       string    `json:"eventId"`
-	RoomID        string    `json:"roomId"`
-	SessionID 	  string 	`json:"sessionId"`
+	ScheduleID    string    `json:"scheduleId"`
+	SessionID     string    `json:"sessionId"`
 	ParticipantID string    `json:"participantId"`
 	StreamID      string    `json:"streamId"`
 	StreamType    string    `json:"streamType"`
@@ -27,8 +56,8 @@ type FrameReadyEvent struct {
 
 type StreamStartedEvent struct {
 	EventID       string    `json:"eventId"`
-	RoomID        string    `json:"roomId"`
-	SessionID 	  string 	`json:"sessionId"`
+	ScheduleID    string    `json:"scheduleId"`
+	SessionID     string    `json:"sessionId"`
 	ParticipantID string    `json:"participantId"`
 	StreamID      string    `json:"streamId"`
 	StreamType    string    `json:"streamType"`
@@ -37,8 +66,8 @@ type StreamStartedEvent struct {
 
 type StreamEndedEvent struct {
 	EventID       string    `json:"eventId"`
-	RoomID        string    `json:"roomId"`
-	SessionID  	  string	`json:"sessionId"`
+	ScheduleID    string    `json:"scheduleId"`
+	SessionID     string    `json:"sessionId"`
 	ParticipantID string    `json:"participantId"`
 	StreamID      string    `json:"streamId"`
 	StreamType    string    `json:"streamType"`
@@ -47,12 +76,12 @@ type StreamEndedEvent struct {
 	EndedAt       time.Time `json:"endedAt"`
 }
 
-type RoomClosedEvent struct {
-	EventID  string    `json:"eventId"`
-	RoomID   string    `json:"roomId"`
-	ExamID   string    `json:"examId"`
-	ClosedAt time.Time `json:"closedAt"`
-	Reason   string    `json:"reason"`
+type ScheduleClosedEvent struct {
+	EventID    string    `json:"eventId"`
+	ScheduleID string    `json:"scheduleId"`
+	ExamID     string    `json:"examId"`
+	ClosedAt   time.Time `json:"closedAt"`
+	Reason     string    `json:"reason"`
 }
 
 type ParticipantEvent struct {
@@ -77,24 +106,24 @@ const (
 )
 
 const (
-	AlertSourceAI = "ai"
+	AlertSourceAI        = "ai"
 	AlertSourceStreaming = "streaming"
 )
 
 func DefaultAlertLevel(alertType string) AlertLevel {
 	switch alertType {
-	case AlertPhoneDetected, AlertMultiplePersons, AlertProhibitedObject: 
+	case AlertPhoneDetected, AlertMultiplePersons, AlertProhibitedObject:
 		return AlertLevelCritical
 	case AlertFaceNotVisible, AlertSuspiciousGaze, AlertStreamDropped, AlertTrackEnded, AlertReconnectLoop, AlertRecordingIncomplete:
 		return AlertLevelWarning
-	default: 
+	default:
 		return AlertLevelInfo
 	}
 }
 
 type AlertEvent struct {
 	Source        string     `json:"source"`
-	RoomID        string     `json:"roomId"`
+	ScheduleID    string     `json:"scheduleId"`
 	ParticipantID string     `json:"participantId"`
 	StreamID      string     `json:"streamId"`
 	StreamType    string     `json:"streamType"`
@@ -108,10 +137,10 @@ type AlertEvent struct {
 
 const (
 	// AI detect alerts
-	AlertPhoneDetected   = "PHONE_DETECTED"
-	AlertMultiplePersons = "MULTIPLE_PERSONS"
-	AlertFaceNotVisible  = "FACE_NOT_VISIBLE"
-	AlertSuspiciousGaze  = "SUSPICIOUS_GAZE"
+	AlertPhoneDetected    = "PHONE_DETECTED"
+	AlertMultiplePersons  = "MULTIPLE_PERSONS"
+	AlertFaceNotVisible   = "FACE_NOT_VISIBLE"
+	AlertSuspiciousGaze   = "SUSPICIOUS_GAZE"
 	AlertProhibitedObject = "PROHIBITED_OBJECT"
 
 	// Streaming service detect alerts
@@ -131,5 +160,7 @@ type EventPublisher interface {
 	PublishFrameReady(ctx context.Context, event FrameReadyEvent) error
 	PublishStreamStarted(ctx context.Context, event StreamStartedEvent) error
 	PublishStreamEnded(ctx context.Context, event StreamEndedEvent) error
-	PublishRoomClosed(ctx context.Context, event RoomClosedEvent) error
+	PublishScheduleClosed(ctx context.Context, event ScheduleClosedEvent) error
+	PublishRecordingAssemblyRequested(ctx context.Context, event RecordingAssemblyRequestedEvent) error
+	PublishRecordingPartChanged(ctx context.Context, event RecordingPartChangedEvent) error
 }

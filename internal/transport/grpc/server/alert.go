@@ -26,8 +26,8 @@ func NewAlertServer(mu *usecase.MonitorUseCase, logger *zap.Logger) *AlertServer
 }
 
 func (s *AlertServer) PushAlert(ctx context.Context, req *alertv1.PushAlertRequest) (*alertv1.PushAlertResponse, error) {
-	if req.RoomId == "" || req.ParticipantId == "" || req.AlertType == "" {
-		return nil, status.Error(codes.InvalidArgument, "roomId, participantId, alertType are required")
+	if req.ScheduleId == "" || req.ParticipantId == "" || req.AlertType == "" {
+		return nil, status.Error(codes.InvalidArgument, "scheduleId, participantId, alertType are required")
 	}
 
 	capturedAt := time.Now().UTC()
@@ -36,7 +36,7 @@ func (s *AlertServer) PushAlert(ctx context.Context, req *alertv1.PushAlertReque
 	}
 	alert := domain.AlertEvent{
 		Source: domain.AlertSourceAI, 
-		RoomID: req.RoomId, 
+		ScheduleID: req.ScheduleId, 
 		ParticipantID: req.ParticipantId, 
 		StreamID: req.StreamId, 
 		StreamType: req.StreamType,
@@ -48,7 +48,7 @@ func (s *AlertServer) PushAlert(ctx context.Context, req *alertv1.PushAlertReque
 	}
 	if err := s.monitorUseCase.PublishAlert(ctx, alert, req.EventId); err != nil {
 		s.logger.Error("publish alert failed", 
-			zap.String("roomId", req.RoomId), 
+			zap.String("scheduleId", req.ScheduleId), 
 			zap.String("alertType", req.AlertType), 
 			zap.Error(err),
 		)
@@ -56,7 +56,7 @@ func (s *AlertServer) PushAlert(ctx context.Context, req *alertv1.PushAlertReque
 	}
 
 	s.logger.Info("ai alert published", 
-		zap.String("roomId", req.RoomId),  
+		zap.String("scheduleId", req.ScheduleId),  
 		zap.String("alertType", req.AlertType), 
 		zap.String("detail", req.Detail),
 		zap.Float32("confidence", req.Confidence),
