@@ -43,6 +43,11 @@ type StreamCoverage struct {
 	Anomalies        []CoverageAnomaly `json:"anomalies"`
 	HasInventory     bool              `json:"hasInventory"`
 	ClientComplete   bool              `json:"clientComplete"`
+	// DeclaredFrames totals what the client says it wrote, counting only segments that actually
+	// arrived -- those are the ones the recording gets assembled from. Compared against the packet
+	// count of the assembled file it shows whether the frames the client believes it captured
+	// survived into the recording; on its own it means nothing. Zero when there is no inventory.
+	DeclaredFrames int64 `json:"declaredFrames"`
 }
 
 func (c StreamCoverage) HasGaps() bool {
@@ -88,6 +93,15 @@ func Reconcile(inventory *cache.StreamInventory, received []cache.SegmentMeta) S
 	coverage.DeclaredSegments = len(inventory.Segments)
 
 	for _, declared := range inventory.Segments {
+		if _, arrived := receivedSeqs[declared.Seq]; arrived {
+			// Counted only for segments that arrived, because the recording is assembled from
+			// those alone. Including segments that never uploaded would make every stream with a
+			// gap also report missing frames -- restating MissingSeqs in a second unit and burying
+			// the thing this number exists to expose, which is frames the client wrote that did
+			// not survive into the file.
+			coverage.DeclaredFrames += declared.FramesWritten
+		}
+
 		if _, arrived := receivedSeqs[declared.Seq]; !arrived {
 			coverage.MissingSeqs = append(coverage.MissingSeqs, declared.Seq)
 			coverage.Anomalies = append(coverage.Anomalies, CoverageAnomaly{

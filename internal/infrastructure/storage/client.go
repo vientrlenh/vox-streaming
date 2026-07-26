@@ -57,6 +57,25 @@ func NewClient(cfg Config, logger *zap.Logger) (*Client, error) {
 	}, nil
 }
 
+// Live HLS fragments are working files for the invigilator's in-exam view, not evidence: the
+// archival copy of the same stream is kept separately under ffmpeg-segments/ and recording.mp4.
+// Nothing reads a fragment once the exam is over, so keeping them for the recording bucket's full
+// retention stores the entire WebRTC ingest twice for a year.
+//
+// They cannot be targeted by prefix -- scheduleID/sessionID/streamID sit in the middle of the key
+// and S3 lifecycle prefixes have no wildcard -- so they are tagged at upload instead and matched by
+// tag here.
+const (
+	liveAssetTagKey        = "class"
+	liveAssetTagValue      = "live"
+	liveAssetRetentionDays = 3
+	recordingRetentionDays = 365
+	frameRetentionDays     = 7
+
+	// PutObject takes the tag set URL-encoded in a single header, not as structured fields.
+	liveAssetTagging = liveAssetTagKey + "=" + liveAssetTagValue
+)
+
 func (c *Client) EnsureBuckets(ctx context.Context) error {
 	specs := []struct {
 		bucket        string
@@ -65,20 +84,22 @@ func (c *Client) EnsureBuckets(ctx context.Context) error {
 		// rewind fragments out of the recording bucket. Frames are consumed as <img> src, which is
 		// not a CORS request at all.
 		browserFetched bool
+		// true only for the bucket that actually holds tagged live assets.
+		expireLiveAssets bool
 	}{
-		{c.cfg.FrameBucket, 7, false},
-		{c.cfg.RecordingBucket, 365, true},
+		{c.cfg.FrameBucket, frameRetentionDays, false, false},
+		{c.cfg.RecordingBucket, recordingRetentionDays, true, true},
 	}
 
 	for _, spec := range specs {
-		if err := c.ensureBucket(ctx, spec.bucket, spec.retentionDays, spec.browserFetched); err != nil {
+		if err := c.ensureBucket(ctx, spec.bucket, spec.retentionDays, spec.browserFetched, spec.expireLiveAssets); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays int32, browserFetched bool) error {
+func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays int32, browserFetched, expireLiveAssets bool) error {
 	_, err := c.s3.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(bucket),
 	})
@@ -112,19 +133,45 @@ func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays 
 		c.logger.Info("bucket created", zap.String("bucket", bucket))
 	}
 
+	rules := []types.LifecycleRule{{
+		ID:     aws.String("auto-expire"),
+		Status: types.ExpirationStatusEnabled,
+		Filter: &types.LifecycleRuleFilter{
+			Prefix: aws.String(""),
+		},
+		Expiration: &types.LifecycleExpiration{
+			Days: aws.Int32(retentionDays),
+		},
+	}}
+
+	if expireLiveAssets {
+		// This overlaps the blanket rule above, which S3 lifecycle cannot express an exception to
+		// (filters have no negation). Where two expiration rules match the same object, S3 applies
+		// the earlier one -- so tagged fragments expire on the short schedule.
+		//
+		// Worth noting for anyone porting this to another S3 implementation: if the backing store
+		// resolved the overlap the other way instead, tagged fragments would simply keep the
+		// bucket's full retention, which is exactly what they had before this rule existed. The
+		// failure mode is "no saving", never "evidence deleted early".
+		rules = append(rules, types.LifecycleRule{
+			ID:     aws.String("expire-live-assets"),
+			Status: types.ExpirationStatusEnabled,
+			Filter: &types.LifecycleRuleFilter{
+				Tag: &types.Tag{
+					Key:   aws.String(liveAssetTagKey),
+					Value: aws.String(liveAssetTagValue),
+				},
+			},
+			Expiration: &types.LifecycleExpiration{
+				Days: aws.Int32(liveAssetRetentionDays),
+			},
+		})
+	}
+
 	_, err = c.s3.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
 		Bucket: aws.String(bucket),
 		LifecycleConfiguration: &types.BucketLifecycleConfiguration{
-			Rules: []types.LifecycleRule{{
-				ID:     aws.String("auto-expire"),
-				Status: types.ExpirationStatusEnabled,
-				Filter: &types.LifecycleRuleFilter{
-					Prefix: aws.String(""),
-				},
-				Expiration: &types.LifecycleExpiration{
-					Days: aws.Int32(retentionDays),
-				},
-			}},
+			Rules: rules,
 		},
 	})
 	if err != nil {
@@ -273,6 +320,7 @@ func (c *Client) UploadHLSInit(ctx context.Context, scheduleID, sessionID, strea
 		Key:         aws.String(key),
 		Body:        r,
 		ContentType: aws.String("video/mp4"),
+		Tagging:     aws.String(liveAssetTagging),
 	})
 	if err != nil {
 		return "", fmt.Errorf("upload hls init segment: %w", err)
@@ -287,6 +335,7 @@ func (c *Client) UploadHLSFragment(ctx context.Context, scheduleID, sessionID, s
 		Key:         aws.String(key),
 		Body:        r,
 		ContentType: aws.String("video/iso.segment"),
+		Tagging:     aws.String(liveAssetTagging),
 	})
 	if err != nil {
 		return "", fmt.Errorf("upload hls fragment: %w", err)

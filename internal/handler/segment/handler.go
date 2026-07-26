@@ -1,6 +1,7 @@
 package segment
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -187,6 +188,7 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	req := usecase.SegmentUploadRequest{
 		StreamID:    streamID,
 		UploadToken: uploadToken,
+		StopReason:  readStopReason(r, h.logger, streamID),
 	}
 	session, newlyCompleted, err := h.useCase.MarkComplete(r.Context(), req)
 	if err != nil {
@@ -201,6 +203,7 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("segment upload marked complete",
 		zap.String("streamId", streamID),
 		zap.Bool("newlyCompleted", newlyCompleted),
+		zap.String("stopReason", session.StopReason),
 	)
 
 	eventID, idErr := uuid.NewV7()
@@ -231,6 +234,47 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	api.WriteNoContent(w)
+}
+
+const maxCompleteBodySize = 1 << 10
+
+type completeRequest struct {
+	StopReason string `json:"stopReason"`
+}
+
+// readStopReason parses the optional /complete body.
+//
+// Optional is the whole design constraint: every client in the field today POSTs to /complete with
+// no body at all, and a stream whose completion is refused never gets assembled and never gets its
+// watchdog disarmed. So every failure path here -- absent body, malformed JSON, unknown reason --
+// yields the empty string and lets completion proceed. A diagnostic must not be able to cost a
+// candidate their recording.
+func readStopReason(r *http.Request, logger *zap.Logger, streamID string) string {
+	if r.Body == nil {
+		return ""
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, maxCompleteBodySize))
+	if err != nil || len(bytes.TrimSpace(body)) == 0 {
+		return ""
+	}
+
+	var parsed completeRequest
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		logger.Warn("ignoring unparseable /complete body",
+			zap.String("streamId", streamID),
+			zap.Error(err),
+		)
+		return ""
+	}
+
+	reason := usecase.NormalizeStopReason(parsed.StopReason)
+	if reason == "" && strings.TrimSpace(parsed.StopReason) != "" {
+		logger.Warn("ignoring unrecognised stop reason",
+			zap.String("streamId", streamID),
+			zap.Int("reasonLength", len(parsed.StopReason)),
+		)
+	}
+	return reason
 }
 
 type inventorySegmentRequest struct {

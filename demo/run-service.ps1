@@ -64,8 +64,14 @@ $env:FFMPEG_INGEST_HLS_SEGMENT_SECONDS = "4"
 $env:FFMPEG_INGEST_HLS_AUDIO_BITRATE_K = "128"
 $env:LIVE_REWIND_WINDOW_MINUTES        = "0"   # 0 = full DVR from stream start; >0 trims to that trailing window
 
-if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-  Write-Warning "ffmpeg not found on PATH. Streaming + fMP4 recording still work, but monitor JPEG frames and final MP4 assembly need ffmpeg. Install: winget install Gyan.FFmpeg"
+# ffprobe is checked separately from ffmpeg: it ships alongside it in every normal install, but the
+# assembler's recording quality checks (missing track, unplayable file, silent audio) shell out to
+# ffprobe specifically, and a PATH with only one of the two fails those silently -- they are
+# non-fatal by design, so the recording still uploads with the checks quietly skipped.
+foreach ($bin in @("ffmpeg", "ffprobe")) {
+  if (-not (Get-Command $bin -ErrorAction SilentlyContinue)) {
+    Write-Warning "$bin not found on PATH. Streaming + fMP4 recording still work, but monitor JPEG frames, final MP4 assembly and recording quality checks need it. Install: winget install Gyan.FFmpeg"
+  }
 }
 
 Write-Host "vox-streaming -> ws :8082 | metrics :9090 | grpc :9096  (Ctrl+C to stop)" -ForegroundColor Cyan

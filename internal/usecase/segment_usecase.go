@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
@@ -31,6 +32,8 @@ type SegmentUploadRequest struct {
 	EndedAt     time.Time
 	SHA256      string
 	Data        []byte
+	// StopReason is only read by MarkComplete. Empty is valid and expected.
+	StopReason string
 }
 
 // InventoryDeclaration is the client telling the server what it has captured, uploaded or not.
@@ -188,7 +191,7 @@ func (u *SegmentUseCase) MarkComplete(ctx context.Context, req SegmentUploadRequ
 		return nil, false, err
 	}
 
-	newlyCompleted, err := u.sessions.MarkUploadComplete(ctx, req.StreamID)
+	newlyCompleted, err := u.sessions.MarkUploadComplete(ctx, req.StreamID, req.StopReason)
 	if err != nil {
 		return nil, false, err
 	}
@@ -196,7 +199,39 @@ func (u *SegmentUseCase) MarkComplete(ctx context.Context, req SegmentUploadRequ
 		return nil, false, fmt.Errorf("mark segment stream complete: %w", err)
 	}
 
+	// session was read before the write above, so reflect the reason the caller just recorded
+	// rather than handing back a copy that says the stream ended for no stated reason.
+	session.Completed = true
+	if req.StopReason != "" {
+		session.StopReason = req.StopReason
+	}
 	return session, newlyCompleted, nil
+}
+
+// KnownStopReasons are the values the desktop client's RecordingStopReason can take. Anything else
+// is dropped rather than stored: this string ends up in operational logs and, later, in the audit
+// trail behind a grading decision, and an endpoint that echoes arbitrary client text into both is
+// a log-injection hole for the sake of a diagnostic.
+var KnownStopReasons = map[string]struct{}{
+	"Submitted":           {},
+	"Expired":             {},
+	"UserClosed":          {},
+	"ApplicationShutdown": {},
+	"CaptureFailure":      {},
+	// Not a client RecordingStopReason: OrphanedUploadRecoveryService finishes a stream whose
+	// original run died without ever reaching /complete, so no stop reason was observed at the
+	// time. Recording that explicitly beats recording nothing, which is indistinguishable from an
+	// old client.
+	"RecoveredAfterCrash": {},
+}
+
+// NormalizeStopReason keeps only reasons this server recognises.
+func NormalizeStopReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if _, ok := KnownStopReasons[reason]; ok {
+		return reason
+	}
+	return ""
 }
 
 func validateUploadOwnership(session *cache.UploadSession, req SegmentUploadRequest) error {
