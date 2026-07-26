@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vientrlenh/vox-streaming/internal/watcher"
 	"go.uber.org/zap"
 )
 
@@ -40,7 +41,7 @@ type RecorderSupervisor struct {
 	logger           *zap.Logger
 
 	segCh  chan string
-	hlsCh  chan HLSFragmentEvent
+	hlsCh  chan watcher.HLSFragmentEvent
 	stopCh chan struct{}
 	doneCh chan struct{}
 	gaveUp atomic.Bool
@@ -74,7 +75,7 @@ func StartRecorderSupervisor(sdpPath, baseOutDir string, segmentSeconds, reorder
 		hls:              hls,
 		logger:           logger,
 		segCh:            make(chan string),
-		hlsCh:            make(chan HLSFragmentEvent),
+		hlsCh:            make(chan watcher.HLSFragmentEvent),
 		stopCh:           make(chan struct{}),
 		doneCh:           make(chan struct{}),
 		cur:              rec,
@@ -197,7 +198,7 @@ func (s *RecorderSupervisor) forwardSegments(rec *Recorder) (producedAny bool) {
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		for path := range WatchSegments(watchCtx, rec.SegmentListPath(), rec.OutputDir()) {
+		for path := range watcher.WatchSegments(watchCtx, rec.SegmentListPath(), rec.OutputDir()) {
 			producedAny = true
 			s.segCh <- path
 		}
@@ -228,7 +229,7 @@ func (s *RecorderSupervisor) forwardHLSFragments(rec *Recorder, attempt int) {
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		for evt := range WatchHLSFragments(watchCtx, rec.HLSDir(), attempt) {
+		for evt := range watcher.WatchHLSFragments(watchCtx, rec.HLSDir(), attempt) {
 			s.hlsCh <- evt
 		}
 	}()
@@ -242,7 +243,7 @@ func (s *RecorderSupervisor) forwardHLSFragments(rec *Recorder, attempt int) {
 // media fragments) across every attempt of this supervisor's lifetime. Closed
 // once the supervisor's run loop exits. Empty/never-sent-to if HLSOptions.Enabled
 // was false.
-func (s *RecorderSupervisor) HLSFragments() <-chan HLSFragmentEvent {
+func (s *RecorderSupervisor) HLSFragments() <-chan watcher.HLSFragmentEvent {
 	return s.hlsCh
 }
 

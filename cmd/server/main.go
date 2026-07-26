@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,6 +19,8 @@ import (
 	"github.com/rs/cors"
 	"github.com/segmentio/kafka-go"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
+	recordHandler "github.com/vientrlenh/vox-streaming/internal/handler/recording"
+	segmentHandler "github.com/vientrlenh/vox-streaming/internal/handler/segment"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/queue"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
@@ -25,10 +28,9 @@ import (
 	grpcClient "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
 	grpcServer "github.com/vientrlenh/vox-streaming/internal/transport/grpc/server"
 	httpRoute "github.com/vientrlenh/vox-streaming/internal/transport/http"
-	recordHandler "github.com/vientrlenh/vox-streaming/internal/handler/recording"
-	segmentHandler "github.com/vientrlenh/vox-streaming/internal/handler/segment"
 	webrtcTransport "github.com/vientrlenh/vox-streaming/internal/transport/webrtc"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
+	"github.com/vientrlenh/vox-streaming/internal/watcher"
 	"github.com/vientrlenh/vox-streaming/pkg/auth"
 	"go.uber.org/zap"
 )
@@ -159,7 +161,10 @@ func main() {
 
 	storageClient := ensureStorage(startupCtx, logger)
 	segmentRegistry := cache.NewSegmentRegistry(redisClient)
-	segmentUseCase := usecase.NewSegmentUseCase(storageClient, segmentRegistry, sessionRegistry, logger)
+	// What the client says it captured, which is what gap detection is measured against -- without
+	// it a stream that simply stops early is indistinguishable from a complete one.
+	inventoryRegistry := cache.NewInventoryRegistry(redisClient)
+	segmentUseCase := usecase.NewSegmentUseCase(storageClient, segmentRegistry, sessionRegistry, inventoryRegistry, logger)
 
 	// grace period the assembler waits after stream.ended for a client
 	// completion signal before assembling with whatever segments have arrived
@@ -168,11 +173,25 @@ func main() {
 		assemblyGraceSecs = 90
 	}
 	assemblerUseCase := usecase.NewAssemblerUseCase(
-		storageClient, segmentRegistry, sessionRegistry, publisher,
+		storageClient, segmentRegistry, inventoryRegistry, sessionRegistry, publisher,
 		time.Duration(assemblyGraceSecs)*time.Second,
 		logger,
 	)
-	segmentHandler := segmentHandler.NewSegmentHandler(segmentUseCase, publisher, jwtValidator, sessionRegistry, logger)
+	// Assembles recordings whose client never called /complete -- a crashed, shut down or
+	// permanently offline exam machine -- so segments already in S3 cannot be stranded as loose
+	// parts with nothing to turn them into a recording.mp4. See usecase.AssemblyWatchdog for why it
+	// fires on upload-session expiry rather than on an inactivity timeout.
+	pendingAssemblyRegistry := cache.NewPendingAssemblyRegistry(redisClient)
+	watchdogIntervalSecs, _ := strconv.Atoi(os.Getenv("ASSEMBLY_WATCHDOG_INTERVAL_SECS"))
+	assemblyWatchdog := watcher.NewAssemblyWatchdog(
+		pendingAssemblyRegistry,
+		segmentRegistry,
+		assemblerUseCase,
+		time.Duration(watchdogIntervalSecs)*time.Second,
+		logger,
+	)
+
+	segmentHandler := segmentHandler.NewSegmentHandler(segmentUseCase, publisher, jwtValidator, sessionRegistry, pendingAssemblyRegistry, logger)
 	recordingHandler := recordHandler.NewHandler(storageClient, os.Getenv("GRPC_SERVICE_TOKEN"), logger)
 
 	ffmpegIngestOpts := buildFFmpegIngestOptions(logger)
@@ -422,6 +441,12 @@ func main() {
 	go func() {
 		if err := recordingAssemblerConsumer.Run(runCtx); err != nil {
 			logger.Error("recording assembler consumer error", zap.Error(err))
+		}
+	}()
+
+	go func() {
+		if err := assemblyWatchdog.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("assembly watchdog error", zap.Error(err))
 		}
 	}()
 

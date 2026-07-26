@@ -19,7 +19,7 @@ func TestRecordingSummary(t *testing.T) {
 			seg(0, base, 5*time.Second),
 			seg(1, base.Add(5*time.Second), 5*time.Second),
 		}
-		durationSecs, hasGaps := recordingSummary(metas)
+		durationSecs, hasGaps, _ := recordingSummary(nil, metas)
 		if hasGaps {
 			t.Error("expected hasGaps=false for contiguous segments")
 		}
@@ -33,7 +33,7 @@ func TestRecordingSummary(t *testing.T) {
 			seg(0, base, 5*time.Second),
 			seg(1, base.Add(20*time.Second), 5*time.Second),
 		}
-		durationSecs, hasGaps := recordingSummary(metas)
+		durationSecs, hasGaps, _ := recordingSummary(nil, metas)
 		if !hasGaps {
 			t.Error("expected hasGaps=true when a >2s gap exists")
 		}

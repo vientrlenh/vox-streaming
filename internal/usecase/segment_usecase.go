@@ -11,6 +11,7 @@ import (
 
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
+	"github.com/vientrlenh/vox-streaming/internal/stream"
 	"go.uber.org/zap"
 )
 
@@ -32,39 +33,65 @@ type SegmentUploadRequest struct {
 	Data        []byte
 }
 
-type SegmentGap struct {
-	FromSeq int64
-	ToSeq   int64
-	Missing time.Duration
-}
-
-type StreamAudit struct {
-	StreamID         string
-	TotalSegments    int
-	RecordedDuration time.Duration
-	Gaps             []SegmentGap
-	HasGaps          bool
+// InventoryDeclaration is the client telling the server what it has captured, uploaded or not.
+type InventoryDeclaration struct {
+	StreamID    string
+	UploadToken string
+	Complete    bool
+	DeclaredAt  time.Time
+	Segments    []cache.DeclaredSegment
 }
 
 type SegmentUseCase struct {
-	storage  *storage.Client
-	segments *cache.SegmentRegistry
-	sessions *cache.SessionRegistry
-	logger   *zap.Logger
+	storage   *storage.Client
+	segments  *cache.SegmentRegistry
+	sessions  *cache.SessionRegistry
+	inventory *cache.InventoryRegistry
+	logger    *zap.Logger
 }
 
 func NewSegmentUseCase(
 	storage *storage.Client,
 	segments *cache.SegmentRegistry,
 	sessions *cache.SessionRegistry,
+	inventory *cache.InventoryRegistry,
 	logger *zap.Logger,
 ) *SegmentUseCase {
 	return &SegmentUseCase{
-		storage:  storage,
-		segments: segments,
-		sessions: sessions,
-		logger:   logger,
+		storage:   storage,
+		segments:  segments,
+		sessions:  sessions,
+		inventory: inventory,
+		logger:    logger,
 	}
+}
+
+// DeclareInventory records what the client says this stream contains. Gated on the same upload-token
+// ownership as Upload: an inventory is what gap detection is measured against, so letting anyone who
+// knows a streamId rewrite it would let them declare a truncated recording complete.
+func (u *SegmentUseCase) DeclareInventory(ctx context.Context, req InventoryDeclaration) error {
+	session, err := u.sessions.LookupUpload(ctx, req.StreamID)
+	if err != nil {
+		return err
+	}
+	if err := validateUploadOwnership(session, SegmentUploadRequest{
+		StreamID:    req.StreamID,
+		UploadToken: req.UploadToken,
+	}); err != nil {
+		return err
+	}
+
+	declaredAt := req.DeclaredAt
+	if declaredAt.IsZero() {
+		declaredAt = time.Now().UTC()
+	}
+
+	return u.inventory.Put(ctx, cache.StreamInventory{
+		StreamID:   req.StreamID,
+		Complete:   req.Complete,
+		DeclaredAt: declaredAt,
+		Segments:   req.Segments,
+	})
 }
 
 func (u *SegmentUseCase) Upload(ctx context.Context, req SegmentUploadRequest) error {
@@ -115,7 +142,7 @@ func (u *SegmentUseCase) Upload(ctx context.Context, req SegmentUploadRequest) e
 // Audit requires the same upload-token ownership as Upload/MarkComplete: streamIDs are UUIDs
 // visible in the segment upload URL, so without this check anyone who observed a candidate's
 // streamId could read another candidate's segment coverage.
-func (u *SegmentUseCase) Audit(ctx context.Context, req SegmentUploadRequest) (*StreamAudit, error) {
+func (u *SegmentUseCase) Audit(ctx context.Context, req SegmentUploadRequest) (*stream.StreamAudit, error) {
 	session, err := u.sessions.LookupUpload(ctx, req.StreamID)
 	if err != nil {
 		return nil, err
@@ -128,42 +155,25 @@ func (u *SegmentUseCase) Audit(ctx context.Context, req SegmentUploadRequest) (*
 	if err != nil {
 		return nil, err
 	}
-	audit := &StreamAudit{
+	inventory, err := u.inventory.Get(ctx, req.StreamID)
+	if err != nil {
+		return nil, err
+	}
+
+	audit := &stream.StreamAudit{
 		StreamID:      req.StreamID,
 		TotalSegments: len(metas),
+		Coverage:      stream.Reconcile(inventory, metas),
 	}
-	if len(metas) == 0 {
-		return audit, nil
+	audit.RecordedDuration = stream.RecordedDuration(inventory, metas)
+	if len(metas) > 0 {
+		audit.Gaps, _ = stream.AuditGaps(metas)
 	}
-
-	audit.Gaps, audit.RecordedDuration = auditGaps(metas)
-	audit.HasGaps = len(audit.Gaps) > 0
+	// Taken from the reconciliation rather than from auditGaps: the timestamp heuristic cannot see
+	// a missing first or last segment, which is exactly the shape of gap a client that died mid-run
+	// leaves behind.
+	audit.HasGaps = audit.Coverage.HasGaps()
 	return audit, nil
-}
-
-// auditGaps computes gaps (>2s between consecutive segments) and total
-// recorded duration (sum of each segment's own span). metas must already be
-// sorted by Seq — cache.SegmentRegistry.List guarantees this. Shared between
-// Audit and AssemblerUseCase.Assemble so both use the same gap definition.
-func auditGaps(metas []cache.SegmentMeta) ([]SegmentGap, time.Duration) {
-	var gaps []SegmentGap
-	var totalRecorded time.Duration
-	for i, m := range metas {
-		totalRecorded += m.EndedAt.Sub(m.StartedAt)
-		if i == 0 {
-			continue
-		}
-		prev := metas[i-1]
-		gap := m.StartedAt.Sub(prev.EndedAt)
-		if gap > 2*time.Second {
-			gaps = append(gaps, SegmentGap{
-				FromSeq: prev.Seq,
-				ToSeq:   m.Seq,
-				Missing: gap,
-			})
-		}
-	}
-	return gaps, totalRecorded
 }
 
 // MarkComplete records that the client has finished uploading all segments

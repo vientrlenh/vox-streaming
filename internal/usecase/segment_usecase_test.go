@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
+	"github.com/vientrlenh/vox-streaming/internal/stream"
 )
 
 func seg(seq int64, startedAt time.Time, dur time.Duration) cache.SegmentMeta {
@@ -21,7 +22,7 @@ func TestAuditGaps(t *testing.T) {
 	base := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
 
 	t.Run("empty input has no gaps or duration", func(t *testing.T) {
-		gaps, dur := auditGaps(nil)
+		gaps, dur := stream.AuditGaps(nil)
 		if len(gaps) != 0 || dur != 0 {
 			t.Fatalf("got gaps=%v dur=%v, want none", gaps, dur)
 		}
@@ -29,7 +30,7 @@ func TestAuditGaps(t *testing.T) {
 
 	t.Run("single segment has no gaps", func(t *testing.T) {
 		metas := []cache.SegmentMeta{seg(0, base, 5*time.Second)}
-		gaps, dur := auditGaps(metas)
+		gaps, dur := stream.AuditGaps(metas)
 		if len(gaps) != 0 {
 			t.Errorf("got gaps=%v, want none", gaps)
 		}
@@ -44,7 +45,7 @@ func TestAuditGaps(t *testing.T) {
 			seg(1, base.Add(5*time.Second), 5*time.Second),
 			seg(2, base.Add(10*time.Second), 5*time.Second),
 		}
-		gaps, dur := auditGaps(metas)
+		gaps, dur := stream.AuditGaps(metas)
 		if len(gaps) != 0 {
 			t.Errorf("got gaps=%v, want none", gaps)
 		}
@@ -58,7 +59,7 @@ func TestAuditGaps(t *testing.T) {
 			seg(0, base, 5*time.Second),
 			seg(1, base.Add(5*time.Second+2*time.Second), 5*time.Second),
 		}
-		gaps, _ := auditGaps(metas)
+		gaps, _ := stream.AuditGaps(metas)
 		if len(gaps) != 0 {
 			t.Errorf("got gaps=%v, want none (boundary is exclusive)", gaps)
 		}
@@ -69,7 +70,7 @@ func TestAuditGaps(t *testing.T) {
 			seg(0, base, 5*time.Second),
 			seg(1, base.Add(5*time.Second+3*time.Second), 5*time.Second),
 		}
-		gaps, dur := auditGaps(metas)
+		gaps, dur := stream.AuditGaps(metas)
 		if len(gaps) != 1 {
 			t.Fatalf("got %d gaps, want 1", len(gaps))
 		}
@@ -88,7 +89,7 @@ func TestAuditGaps(t *testing.T) {
 			seg(2, base.Add(11*time.Second), time.Second),
 			seg(3, base.Add(30*time.Second), time.Second),
 		}
-		gaps, _ := auditGaps(metas)
+		gaps, _ := stream.AuditGaps(metas)
 		if len(gaps) != 2 {
 			t.Fatalf("got %d gaps, want 2: %+v", len(gaps), gaps)
 		}

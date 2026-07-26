@@ -18,6 +18,7 @@ import (
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
 	"github.com/vientrlenh/vox-streaming/internal/recorder"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
+	"github.com/vientrlenh/vox-streaming/internal/watcher"
 	"go.uber.org/zap"
 )
 
@@ -629,7 +630,7 @@ func (p *Peer) runHLSFragmentUploader(st *ffmpegIngestState, sup *recorder.Recor
 	}
 }
 
-func (p *Peer) uploadHLSInit(ctx context.Context, evt recorder.HLSFragmentEvent) error {
+func (p *Peer) uploadHLSInit(ctx context.Context, evt watcher.HLSFragmentEvent) error {
 	f, err := os.Open(evt.Path)
 	if err != nil {
 		return fmt.Errorf("open hls init segment: %w", err)
@@ -651,7 +652,7 @@ func (p *Peer) uploadHLSInit(ctx context.Context, evt recorder.HLSFragmentEvent)
 	return nil
 }
 
-func (p *Peer) uploadHLSFragment(ctx context.Context, evt recorder.HLSFragmentEvent, seq int64, startedAt, endedAt time.Time) error {
+func (p *Peer) uploadHLSFragment(ctx context.Context, evt watcher.HLSFragmentEvent, seq int64, startedAt, endedAt time.Time) error {
 	f, err := os.Open(evt.Path)
 	if err != nil {
 		return fmt.Errorf("open hls fragment: %w", err)

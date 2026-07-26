@@ -17,6 +17,7 @@ import (
 	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
+	"github.com/vientrlenh/vox-streaming/internal/stream"
 	"github.com/vientrlenh/vox-streaming/internal/util"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -25,6 +26,7 @@ import (
 type AssemblerUseCase struct {
 	storage     *storage.Client
 	segments    *cache.SegmentRegistry
+	inventory   *cache.InventoryRegistry
 	sessions    *cache.SessionRegistry
 	publisher   domain.EventPublisher
 	gracePeriod time.Duration
@@ -39,6 +41,7 @@ var errRecordingStatePublish = errors.New("publish recording state")
 func NewAssemblerUseCase(
 	storage *storage.Client,
 	segments *cache.SegmentRegistry,
+	inventory *cache.InventoryRegistry,
 	sessions *cache.SessionRegistry,
 	publisher domain.EventPublisher,
 	gracePeriod time.Duration,
@@ -52,6 +55,7 @@ func NewAssemblerUseCase(
 	return &AssemblerUseCase{
 		storage:     storage,
 		segments:    segments,
+		inventory:   inventory,
 		sessions:    sessions,
 		publisher:   publisher,
 		gracePeriod: gracePeriod,
@@ -148,7 +152,7 @@ func (u *AssemblerUseCase) assemble(ctx context.Context, event domain.RecordingA
 		return fmt.Errorf("check existing recording: %w", err)
 	}
 	if exists {
-		durationSecs, hasGaps := recordingSummary(metas)
+		durationSecs, hasGaps, _ := u.loadSummary(ctx, streamID, metas)
 		if err := u.publishRecordingState(ctx, event, recordingStatus(hasGaps), storage.FinalRecordingKey(scheduleID, sessionID, streamID), durationSecs, hasGaps, ""); err != nil {
 			return fmt.Errorf("%w: %v", errRecordingStatePublish, err)
 		}
@@ -156,9 +160,11 @@ func (u *AssemblerUseCase) assemble(ctx context.Context, event domain.RecordingA
 		return nil
 	}
 
-	gaps, _ := auditGaps(metas)
-	if len(gaps) > 0 {
-		log.Warn("segment gaps detected, assembling best-effort anyway", zap.Int("gapCount", len(gaps)))
+	durationSecs, hasGaps, coverage := u.loadSummary(ctx, streamID, metas)
+	logCoverage(log, coverage)
+	if hasGaps {
+		log.Warn("segment gaps detected, assembling best-effort anyway",
+			zap.Int("missingCount", len(coverage.MissingSeqs)))
 	}
 
 	jobDir := filepath.Join(u.workDir, streamID)
@@ -215,7 +221,6 @@ func (u *AssemblerUseCase) assemble(ctx context.Context, event domain.RecordingA
 		return fmt.Errorf("upload final recording: %w", err)
 	}
 
-	durationSecs, hasGaps := recordingSummary(metas)
 	if err := u.publishRecordingState(ctx, event, recordingStatus(hasGaps), recordingKey, durationSecs, hasGaps, ""); err != nil {
 		return fmt.Errorf("%w: %v", errRecordingStatePublish, err)
 	}
@@ -224,9 +229,67 @@ func (u *AssemblerUseCase) assemble(ctx context.Context, event domain.RecordingA
 	return nil
 }
 
-func recordingSummary(metas []cache.SegmentMeta) (int64, bool) {
-	gaps, _ := auditGaps(metas)
-	return int64(metas[len(metas)-1].EndedAt.Sub(metas[0].StartedAt).Seconds()), len(gaps) > 0
+// recordingSummary reports how long the recording covers and whether anything is missing from it.
+//
+// Both figures come from the client's declared inventory when there is one. Deriving them from the
+// received segments alone -- last.EndedAt minus first.StartedAt, plus interior timestamp gaps --
+// silently launders away exactly the failures worth reporting: segments missing from the start or
+// the end leave no interval to measure, so a recording truncated by a client that died mid-upload
+// reports itself as complete and correctly sized.
+func recordingSummary(
+	inventory *cache.StreamInventory,
+	metas []cache.SegmentMeta,
+) (int64, bool, stream.StreamCoverage) {
+	coverage := stream.Reconcile(inventory, metas)
+	return int64(stream.RecordedDuration(inventory, metas).Seconds()), coverage.HasGaps(), coverage
+}
+
+// loadSummary is recordingSummary plus the cache read, kept apart so the decision logic above stays
+// a pure function that can be tested without Redis.
+func (u *AssemblerUseCase) loadSummary(
+	ctx context.Context,
+	streamID string,
+	metas []cache.SegmentMeta,
+) (int64, bool, stream.StreamCoverage) {
+	inventory, err := u.inventory.Get(ctx, streamID)
+	if err != nil {
+		// Not fatal: fall back to the weaker heuristic rather than refuse to assemble a recording
+		// over a cache read.
+		u.logger.Warn("could not load segment inventory; falling back to timestamp-based gap detection",
+			zap.String("streamId", streamID),
+			zap.Error(err),
+		)
+		inventory = nil
+	}
+	return recordingSummary(inventory, metas)
+}
+
+// logCoverage surfaces what the reconciliation found. Reported, never acted on: a low frame rate or
+// an empty segment has an innocent reading (a still screen, a paused exam) as readily as a damning
+// one, and choosing between them is a human's job, not the assembler's.
+func logCoverage(log *zap.Logger, coverage stream.StreamCoverage) {
+	if len(coverage.MissingSeqs) > 0 {
+		log.Warn("recording is missing segments the client declared",
+			zap.Int("declaredSegments", coverage.DeclaredSegments),
+			zap.Int("receivedSegments", coverage.ReceivedSegments),
+			zap.Int64s("missingSeqs", coverage.MissingSeqs),
+		)
+	}
+
+	for _, anomaly := range coverage.Anomalies {
+		if anomaly.Kind == stream.AnomalyMissing {
+			continue // already reported in aggregate above
+		}
+		log.Warn("recording capture anomaly",
+			zap.Int64("seq", anomaly.Seq),
+			zap.String("kind", anomaly.Kind),
+			zap.String("detail", anomaly.Detail),
+		)
+	}
+
+	if !coverage.HasInventory {
+		log.Info("stream had no client inventory; gaps at the start or end of this recording cannot be detected")
+	}
 }
 
 func recordingStatus(hasGaps bool) string {

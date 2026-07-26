@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
+	"github.com/vientrlenh/vox-streaming/internal/stream"
 	"github.com/vientrlenh/vox-streaming/internal/transport/api"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
 	"github.com/vientrlenh/vox-streaming/pkg/auth"
@@ -27,6 +28,16 @@ const (
 	maxSegmentSize     = 50 << 20 // 50 MB
 	maxSegmentDuration = 2 * time.Minute
 	maxCreateBodySize  = 4 << 10 // 4 KB
+
+	// A whole exam's inventory in one document: a few hundred entries of a couple of hundred bytes.
+	// The generous ceiling is a guard against abuse, not an expected size.
+	maxInventoryBodySize = 2 << 20 // 2 MB
+	maxInventorySegments = 5000
+
+	// How long after an upload session expires the watchdog should assemble it. The credential is
+	// already dead at ExpiresAt, so nothing can be added past that point; this only absorbs clock
+	// skew between the session's own TTL and the sweep that acts on it.
+	assemblyWatchdogGrace = 2 * time.Minute
 )
 
 type SegmentHandler struct {
@@ -34,15 +45,17 @@ type SegmentHandler struct {
 	publisher       domain.EventPublisher
 	validator       *auth.Validator
 	sessionRegistry *cache.SessionRegistry
+	pendingAssembly *cache.PendingAssemblyRegistry
 	logger          *zap.Logger
 }
 
-func NewSegmentHandler(uc *usecase.SegmentUseCase, publisher domain.EventPublisher, v *auth.Validator, sr *cache.SessionRegistry, logger *zap.Logger) *SegmentHandler {
+func NewSegmentHandler(uc *usecase.SegmentUseCase, publisher domain.EventPublisher, v *auth.Validator, sr *cache.SessionRegistry, pa *cache.PendingAssemblyRegistry, logger *zap.Logger) *SegmentHandler {
 	return &SegmentHandler{
 		useCase:         uc,
 		publisher:       publisher,
 		validator:       v,
 		sessionRegistry: sr,
+		pendingAssembly: pa,
 		logger:          logger,
 	}
 }
@@ -206,6 +219,99 @@ func (h *SegmentHandler) Complete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot queue recording assembly", http.StatusServiceUnavailable)
 		return
 	}
+
+	// Only after the assembly job is durably queued: disarming any earlier would leave a window
+	// where neither the client nor the watchdog owns this stream. Disarming late is harmless --
+	// assembly is idempotent -- so the ordering is safe in exactly one direction.
+	if err := h.pendingAssembly.Cancel(r.Context(), streamID); err != nil {
+		h.logger.Warn("disarm assembly watchdog failed; it may assemble this stream again later, which is idempotent",
+			zap.String("streamId", streamID),
+			zap.Error(err),
+		)
+	}
+
+	api.WriteNoContent(w)
+}
+
+type inventorySegmentRequest struct {
+	Seq           int64     `json:"seq"`
+	StartedAt     time.Time `json:"startedAt"`
+	EndedAt       time.Time `json:"endedAt"`
+	SHA256        string    `json:"sha256"`
+	SizeBytes     int64     `json:"sizeBytes"`
+	FramesWritten int64     `json:"framesWritten"`
+}
+
+type inventoryRequest struct {
+	Complete   bool                      `json:"complete"`
+	DeclaredAt time.Time                 `json:"declaredAt"`
+	Segments   []inventorySegmentRequest `json:"segments"`
+}
+
+// DeclareInventory handles PUT /stream/sessions/{streamId}/inventory: the client's own account of
+// what it has captured, whether or not it managed to upload it.
+//
+// Sent repeatedly during a recording rather than only at the end, and that is the entire point: an
+// inventory that only arrives with /complete tells the server nothing in the one case worth
+// protecting against, which is the client never getting to /complete at all.
+func (h *SegmentHandler) DeclareInventory(w http.ResponseWriter, r *http.Request) {
+	uploadToken, err := bearerToken(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	streamID := r.PathValue("streamId")
+	if _, err := uuid.Parse(streamID); err != nil {
+		http.Error(w, "invalid streamId", http.StatusBadRequest)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxInventoryBodySize)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	var body inventoryRequest
+	if err := decoder.Decode(&body); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if len(body.Segments) > maxInventorySegments {
+		http.Error(w, "too many segments", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	segments := make([]cache.DeclaredSegment, len(body.Segments))
+	for i, segment := range body.Segments {
+		segments[i] = cache.DeclaredSegment{
+			Seq:           segment.Seq,
+			StartedAt:     segment.StartedAt,
+			EndedAt:       segment.EndedAt,
+			SHA256:        segment.SHA256,
+			SizeBytes:     segment.SizeBytes,
+			FramesWritten: segment.FramesWritten,
+		}
+	}
+
+	if err := h.useCase.DeclareInventory(r.Context(), usecase.InventoryDeclaration{
+		StreamID:    streamID,
+		UploadToken: uploadToken,
+		Complete:    body.Complete,
+		DeclaredAt:  body.DeclaredAt,
+		Segments:    segments,
+	}); err != nil {
+		h.logger.Warn("declare segment inventory failed",
+			zap.String("streamId", streamID),
+			zap.Error(err),
+		)
+		writeUseCaseError(w, err, "declare inventory failed")
+		return
+	}
+
 	api.WriteNoContent(w)
 }
 
@@ -256,9 +362,12 @@ type AuditResponse struct {
 	RecordedDurationSecs int64              `json:"recordedDurationSecs"`
 	HasGaps              bool               `json:"hasGaps"`
 	Gaps                 []AuditGapResponse `json:"gaps"`
+	// What the client declared measured against what arrived. Empty when the client has not sent an
+	// inventory, in which case HasGaps falls back to the weaker timestamp heuristic.
+	Coverage stream.StreamCoverage `json:"coverage"`
 }
 
-func toAuditResponse(audit *usecase.StreamAudit) AuditResponse {
+func toAuditResponse(audit *stream.StreamAudit) AuditResponse {
 	gaps := make([]AuditGapResponse, len(audit.Gaps))
 	for i, g := range audit.Gaps {
 		gaps[i] = AuditGapResponse{
@@ -273,6 +382,7 @@ func toAuditResponse(audit *usecase.StreamAudit) AuditResponse {
 		RecordedDurationSecs: int64(audit.RecordedDuration.Seconds()),
 		HasGaps:              audit.HasGaps,
 		Gaps:                 gaps,
+		Coverage:             audit.Coverage,
 	}
 }
 
@@ -357,6 +467,26 @@ func (h *SegmentHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		)
 		http.Error(w, "cannot register session", http.StatusInternalServerError)
 		return
+	}
+
+	// Arm the watchdog for this stream. Reached on a resumed session too (created == false), where
+	// RegisterOrGetUpload has just pushed ExpiresAt out and the due time must follow it.
+	//
+	// A failure here is logged rather than returned: the client's own /complete remains the primary
+	// path, and refusing to start recording because the safety net could not be armed would trade a
+	// rare unassembled recording for a certain missing one.
+	if err := h.pendingAssembly.Schedule(r.Context(), cache.PendingAssembly{
+		StreamID:      registered.StreamID,
+		ScheduleID:    registered.ScheduleID,
+		SessionID:     registered.SessionID,
+		ParticipantID: registered.CandidateID,
+		StreamType:    registered.StreamType,
+		DueAt:         registered.ExpiresAt.Add(assemblyWatchdogGrace),
+	}); err != nil {
+		h.logger.Error("arm assembly watchdog failed; this stream will only be assembled if the client calls /complete",
+			zap.String("streamId", registered.StreamID),
+			zap.Error(err),
+		)
 	}
 
 	status := http.StatusOK
