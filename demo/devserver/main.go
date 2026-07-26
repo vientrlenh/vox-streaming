@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/vientrlenh/vox-streaming/pkg/auth"
@@ -63,6 +64,11 @@ func (examStub) UpdateRecording(_ context.Context, req *examv1.UpdateRecordingRe
 }
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatalf("env file could not be loaded")
+	}
+
 	secret := os.Getenv("JWT_STREAM_SECRET")
 	if secret == "" {
 		log.Fatalf("JWT_STREAM_SECRET not found in environment")
