@@ -3,8 +3,10 @@ package usecase
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -241,7 +243,6 @@ func (u *AssemblerUseCase) assemble(ctx context.Context, event domain.RecordingA
 	}
 
 	quality := u.inspectRecording(ctx, log, outputPath, coverage, uploadSession)
-	_ = quality // consumed by the source-selection work; logged for now
 
 	f, err := os.Open(outputPath)
 	if err != nil {
@@ -253,6 +254,8 @@ func (u *AssemblerUseCase) assemble(ctx context.Context, event domain.RecordingA
 	if err != nil {
 		return fmt.Errorf("upload final recording: %w", err)
 	}
+
+	u.storeQualityReport(ctx, log, event, recordingKey, quality, coverage, uploadSession)
 
 	if err := u.publishRecordingState(ctx, event, recordingStatus(hasGaps), recordingKey, durationSecs, hasGaps, ""); err != nil {
 		return fmt.Errorf("%w: %v", errRecordingStatePublish, err)
@@ -444,6 +447,159 @@ type RecordingQuality struct {
 	WindowKnown    bool
 	WindowSecs     float64
 	OverrunsWindow bool
+}
+
+const qualityReportSchemaVersion = 1
+
+// RecordingQualityReport is the durable form of RecordingQuality: the same measurements plus enough
+// identity to stand on their own, written beside the recording as quality.json.
+//
+// Kept as its own type rather than tagging RecordingQuality, for two reasons. The in-process struct
+// is free to carry -Inf for a level that has no finite value, which encoding/json refuses outright
+// -- one silent recording would fail the marshal and take the whole report with it. And a stored
+// document is a contract with whoever reads it months later: it needs a schema version and stable
+// field names, neither of which should pin the shape of a struct the assembler passes around.
+type RecordingQualityReport struct {
+	SchemaVersion int       `json:"schemaVersion"`
+	MeasuredAt    time.Time `json:"measuredAt"`
+
+	StreamID     string `json:"streamId"`
+	ScheduleID   string `json:"scheduleId"`
+	SessionID    string `json:"sessionId"`
+	StreamType   string `json:"streamType,omitempty"`
+	Source       string `json:"source"`
+	RecordingKey string `json:"recordingKey"`
+	// Absent means nobody reported a clean end to this stream, which is itself a finding -- see
+	// cache.UploadSession.StopReason.
+	StopReason string `json:"stopReason,omitempty"`
+
+	Probed       bool     `json:"probed"`
+	DurationSecs *float64 `json:"durationSecs"`
+	HasVideo     bool     `json:"hasVideo"`
+	HasAudio     bool     `json:"hasAudio"`
+
+	AudioMeasured bool     `json:"audioMeasured"`
+	AudioPeakDBFS *float64 `json:"audioPeakDbfs"`
+	AudioMeanDBFS *float64 `json:"audioMeanDbfs"`
+	Silent        bool     `json:"silent"`
+	// Stored next to the verdict it produced, so an old report stays readable after the threshold
+	// is retuned rather than silently meaning something else.
+	SilenceThresholdDBFS float64 `json:"silenceThresholdDbfs"`
+
+	FramesCompared bool  `json:"framesCompared"`
+	DeclaredFrames int64 `json:"declaredFrames"`
+	ActualPackets  int64 `json:"actualPackets"`
+
+	WindowKnown    bool     `json:"windowKnown"`
+	WindowSecs     *float64 `json:"windowSecs"`
+	OverrunsWindow bool     `json:"overrunsWindow"`
+
+	// The reconciliation the frame comparison was made against: what the client declared, what
+	// arrived, and what looked wrong. Carried along because the frame numbers above mean nothing
+	// without it.
+	Coverage stream.StreamCoverage `json:"coverage"`
+}
+
+func newQualityReport(
+	event domain.RecordingAssemblyRequestedEvent,
+	recordingKey string,
+	quality RecordingQuality,
+	coverage stream.StreamCoverage,
+	session *cache.UploadSession,
+	measuredAt time.Time,
+) RecordingQualityReport {
+	report := RecordingQualityReport{
+		SchemaVersion: qualityReportSchemaVersion,
+		MeasuredAt:    measuredAt,
+
+		StreamID:     event.StreamID,
+		ScheduleID:   event.ScheduleID,
+		SessionID:    event.SessionID,
+		StreamType:   event.StreamType,
+		Source:       event.Source,
+		RecordingKey: recordingKey,
+
+		Probed:   quality.Probed,
+		HasVideo: quality.HasVideo,
+		HasAudio: quality.HasAudio,
+
+		AudioMeasured:        quality.AudioMeasured,
+		Silent:               quality.Silent,
+		SilenceThresholdDBFS: media.SilentPeakDBFS,
+
+		FramesCompared: quality.FramesCompared,
+		DeclaredFrames: quality.DeclaredFrames,
+		ActualPackets:  quality.ActualPackets,
+
+		WindowKnown:    quality.WindowKnown,
+		OverrunsWindow: quality.OverrunsWindow,
+
+		Coverage: coverage,
+	}
+
+	if session != nil {
+		report.StopReason = session.StopReason
+	}
+	// Each measurement is emitted only when its own "was this measurable" flag says so, so an
+	// unprobed recording reports null rather than a zero that reads as a real reading of zero.
+	if quality.Probed {
+		report.DurationSecs = jsonFloat(quality.DurationSecs)
+	}
+	if quality.AudioMeasured {
+		report.AudioPeakDBFS = jsonFloat(quality.AudioPeakDBFS)
+		report.AudioMeanDBFS = jsonFloat(quality.AudioMeanDBFS)
+	}
+	if quality.WindowKnown {
+		report.WindowSecs = jsonFloat(quality.WindowSecs)
+	}
+	return report
+}
+
+// jsonFloat renders a measurement as a JSON number, or null when it has no finite value.
+//
+// volumedetect reports digital silence as -inf, and encoding/json fails the entire document on an
+// infinity rather than dropping the one field -- so without this, the recordings most worth having
+// a report about are exactly the ones that would not get one. null is also the more honest
+// encoding: any number substituted for it would be read back as a real measured level.
+func jsonFloat(v float64) *float64 {
+	if math.IsInf(v, 0) || math.IsNaN(v) {
+		return nil
+	}
+	return &v
+}
+
+// storeQualityReport writes the measured signals beside the recording they describe.
+//
+// Runs after the recording is safely uploaded, and never returns an error. The ordering and the
+// silence are the same judgement: a report is an explanation of the evidence, so failing an
+// assembly to protect it would trade the evidence for the explanation. A recording with no report
+// is worth far more than a report with no recording.
+func (u *AssemblerUseCase) storeQualityReport(
+	ctx context.Context,
+	log *zap.Logger,
+	event domain.RecordingAssemblyRequestedEvent,
+	recordingKey string,
+	quality RecordingQuality,
+	coverage stream.StreamCoverage,
+	session *cache.UploadSession,
+) {
+	report := newQualityReport(event, recordingKey, quality, coverage, session, time.Now().UTC())
+
+	// Indented because this is read by people, one file at a time, while working out what happened
+	// to a single exam -- never bulk-parsed where the extra bytes would matter.
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		log.Warn("could not encode recording quality report", zap.Error(err))
+		return
+	}
+
+	key, err := u.storage.UploadQualityReport(ctx, event.ScheduleID, event.SessionID, event.StreamID, data)
+	if err != nil {
+		log.Warn("could not store recording quality report; the signals survive only in this log",
+			zap.Error(err))
+		return
+	}
+	log.Info("recording quality report stored", zap.String("qualityKey", key))
 }
 
 const (

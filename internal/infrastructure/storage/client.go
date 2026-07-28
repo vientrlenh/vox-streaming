@@ -347,6 +347,36 @@ func FinalRecordingKey(scheduleID, sessionID, streamID string) string {
 	return fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/recording.mp4", scheduleID, sessionID, streamID)
 }
 
+// QualityReportKey is where a recording's measured quality signals live: beside the recording they
+// describe, under the same retention, in the same bucket.
+//
+// Deliberately not Redis and not a log line. The signals exist to answer a question asked long
+// after the exam -- why a recording is short, why it has no sound, whether the file is the one the
+// client believed it captured -- and Redis keys expire while logs roll over. An object next to the
+// evidence outlives both and travels with it.
+func QualityReportKey(scheduleID, sessionID, streamID string) string {
+	return fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/quality.json", scheduleID, sessionID, streamID)
+}
+
+// UploadQualityReport stores the quality report for an already-uploaded recording.
+//
+// Untagged, so it keeps the recording bucket's full retention rather than the short live-asset
+// window: a report that expired before the recording it describes would leave the recording
+// unexplained for most of its life.
+func (c *Client) UploadQualityReport(ctx context.Context, scheduleID, sessionID, streamID string, report []byte) (string, error) {
+	key := QualityReportKey(scheduleID, sessionID, streamID)
+	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(c.cfg.RecordingBucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(report),
+		ContentType: aws.String("application/json"),
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload quality report: %w", err)
+	}
+	return key, nil
+}
+
 // check finalized mp4 file was assemblized and uploaded yet
 // to make sure idempotency for assembler consumer
 func (c *Client) RecordingExists(ctx context.Context, scheduleID, sessionID, streamID string) (bool, error) {

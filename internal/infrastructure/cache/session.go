@@ -238,6 +238,12 @@ func (r *SessionRegistry) LookupUpload(ctx context.Context, streamID string) (*U
 // changes nothing else. A client that crashed mid-completion and retried is exactly the case where
 // the reason is worth having, and refusing to record it because the session was already closed
 // would drop it in the one situation it explains something.
+//
+// First writer wins, though, because the later caller is the one more likely to be guessing. A run
+// that completes normally reports why it stopped; if it then dies before recording that locally,
+// startup recovery re-completes the same stream and reports RecoveredAfterCrash -- which is true of
+// that run, but not of the recording, and overwriting with it would replace an observed reason with
+// a salvage marker. An absent reason is still filled in by whoever does turn up with one.
 var markUploadCompleteScript = redis.NewScript(`
 local raw = redis.call("GET", KEYS[1])
 if not raw then
@@ -247,7 +253,7 @@ end
 local session = cjson.decode(raw)
 local already = session.completed
 
-if ARGV[1] ~= "" then
+if ARGV[1] ~= "" and (session.stopReason == nil or session.stopReason == "") then
   session.stopReason = ARGV[1]
 end
 session.completed = true

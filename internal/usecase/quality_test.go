@@ -1,10 +1,14 @@
 package usecase
 
 import (
+	"encoding/json"
+	"math"
 	"testing"
 	"time"
 
+	"github.com/vientrlenh/vox-streaming/internal/domain"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
+	"github.com/vientrlenh/vox-streaming/internal/stream"
 	"go.uber.org/zap"
 )
 
@@ -111,4 +115,105 @@ func TestCheckDurationWindow(t *testing.T) {
 			t.Errorf("got %+v, want an unknown window and no verdict", quality)
 		}
 	})
+}
+
+func sampleAssemblyEvent() domain.RecordingAssemblyRequestedEvent {
+	return domain.RecordingAssemblyRequestedEvent{
+		StreamID:   "stream-1",
+		ScheduleID: "schedule-1",
+		SessionID:  "session-1",
+		StreamType: "camera",
+		Source:     "DESKTOP_SEGMENT_UPLOAD",
+	}
+}
+
+// A silent recording measures -inf, and encoding/json fails an entire document on an infinity
+// rather than dropping the offending field. Without jsonFloat that means the recordings most worth
+// explaining are precisely the ones that would get no report at all.
+func TestQualityReportEncodesUnmeasurableLevelsAsNull(t *testing.T) {
+	quality := RecordingQuality{
+		Probed:        true,
+		DurationSecs:  1260,
+		HasVideo:      true,
+		HasAudio:      true,
+		AudioMeasured: true,
+		AudioPeakDBFS: math.Inf(-1),
+		AudioMeanDBFS: math.Inf(-1),
+		Silent:        true,
+	}
+
+	report := newQualityReport(sampleAssemblyEvent(), "recording.mp4", quality,
+		stream.StreamCoverage{}, nil, time.Now().UTC())
+
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("a silent recording must still produce a report: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal report: %v", err)
+	}
+	for _, field := range []string{"audioPeakDbfs", "audioMeanDbfs"} {
+		if decoded[field] != nil {
+			t.Errorf("%s = %v, want null for an unmeasurable level", field, decoded[field])
+		}
+	}
+	// The verdict itself must survive: null levels are why the report exists here, not a reason to
+	// lose the finding they produced.
+	if decoded["silent"] != true {
+		t.Errorf("silent = %v, want true", decoded["silent"])
+	}
+}
+
+// Absent and zero are different answers. A recording nothing could be measured on must not report
+// numbers that read as real readings of zero.
+func TestQualityReportOmitsSignalsThatWereNeverMeasured(t *testing.T) {
+	report := newQualityReport(sampleAssemblyEvent(), "recording.mp4", RecordingQuality{},
+		stream.StreamCoverage{}, nil, time.Now().UTC())
+
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal report: %v", err)
+	}
+
+	for _, field := range []string{"durationSecs", "audioPeakDbfs", "audioMeanDbfs", "windowSecs"} {
+		if decoded[field] != nil {
+			t.Errorf("%s = %v, want null when nothing was measured", field, decoded[field])
+		}
+	}
+	if decoded["probed"] != false || decoded["audioMeasured"] != false {
+		t.Errorf("the measurable flags must say so: %v", decoded)
+	}
+}
+
+func TestQualityReportCarriesTheStopReason(t *testing.T) {
+	session := &cache.UploadSession{StopReason: "RecoveredAfterCrash"}
+	report := newQualityReport(sampleAssemblyEvent(), "recording.mp4", RecordingQuality{},
+		stream.StreamCoverage{}, session, time.Now().UTC())
+
+	if report.StopReason != "RecoveredAfterCrash" {
+		t.Errorf("StopReason = %q, want the session's reason", report.StopReason)
+	}
+	if report.SchemaVersion != qualityReportSchemaVersion {
+		t.Errorf("SchemaVersion = %d, want %d", report.SchemaVersion, qualityReportSchemaVersion)
+	}
+	if report.SilenceThresholdDBFS == 0 {
+		t.Error("the threshold the verdict was made against must be recorded with it")
+	}
+
+	// An expired session is the normal state for a watchdog-driven assembly; it must cost the stop
+	// reason and nothing else.
+	noSession := newQualityReport(sampleAssemblyEvent(), "recording.mp4", RecordingQuality{},
+		stream.StreamCoverage{}, nil, time.Now().UTC())
+	if noSession.StopReason != "" {
+		t.Errorf("StopReason = %q, want empty when there is no session", noSession.StopReason)
+	}
+	if noSession.StreamID != "stream-1" {
+		t.Errorf("identity must survive a missing session, got %+v", noSession)
+	}
 }

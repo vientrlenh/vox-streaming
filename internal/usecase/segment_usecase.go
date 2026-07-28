@@ -201,8 +201,12 @@ func (u *SegmentUseCase) MarkComplete(ctx context.Context, req SegmentUploadRequ
 
 	// session was read before the write above, so reflect the reason the caller just recorded
 	// rather than handing back a copy that says the stream ended for no stated reason.
+	//
+	// Guarded by the same first-writer-wins rule the script applies, so the returned copy says what
+	// was actually stored. Assigning req.StopReason unconditionally would report a reason the store
+	// had just declined to take, and this copy is what the handler logs.
 	session.Completed = true
-	if req.StopReason != "" {
+	if session.StopReason == "" {
 		session.StopReason = req.StopReason
 	}
 	return session, newlyCompleted, nil
