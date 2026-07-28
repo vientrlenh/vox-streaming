@@ -495,7 +495,7 @@ func (h *SegmentHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	if scheduleEnd, ok := claims.ScheduleEnd(); ok && scheduleEnd.After(uploadWindowEnd) {
 		uploadWindowEnd = scheduleEnd
 	}
-	expiresAt := claims.ExpiresAt.Time.UTC().Add(30 * time.Minute)
+	expiresAt := uploadWindowEnd.Add(uploadCredentialGrade)
 	uploadToken, uploadTokenHash, err := newUploadToken()
 	if err != nil {
 		http.Error(w, "cannot create upload credential", http.StatusInternalServerError)

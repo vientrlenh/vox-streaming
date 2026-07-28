@@ -47,11 +47,6 @@ type Handler struct {
 
 type MonitorMessage struct {
 	Type 	string 			`json:"type"`
-	// KHÔNG omitempty: một snapshot rỗng là thông tin có nghĩa - "hiện không ai
-	// đang stream" - chứ không phải trường thiếu. Với omitempty, ca thi chưa có
-	// ai lên sóng gửi đi đúng {"type":"snapshot"} và client nhận được undefined
-	// thay vì mảng rỗng. Các trường con trỏ bên dưới thì omitempty là đúng, vì ở
-	// đó vắng mặt thật sự nghĩa là "thông điệp này không thuộc loại ấy".
 	Streams []usecase.StreamInfo `json:"streams"`
 	Frame *FrameNotification `json:"frame,omitempty"`
 	Event *domain.ParticipantEvent `json:"event,omitempty"`
