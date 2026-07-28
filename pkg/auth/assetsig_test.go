@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -80,5 +81,61 @@ func TestVerifyAssetRejectsMalformed(t *testing.T) {
 		if err := v.VerifyAsset("stream-1", sig); err == nil {
 			t.Errorf("expected %q to be rejected", sig)
 		}
+	}
+}
+
+// The signature is embedded in the #EXT-X-MAP URI of every live-rewind playlist,
+// and hls.js treats a changed URI as a different init segment: it refetches and
+// re-appends it, resetting the decoder and stalling playback. A playlist is
+// rebuilt on every poll, so a signature derived from the exact call time changed
+// on every poll and stalled the viewer roughly once per fragment.
+//
+// Asserted structurally rather than by sleeping: exp must sit on a bucket
+// boundary offset by the TTL, which pins the property regardless of when the
+// test happens to run.
+func TestSignAssetIsStableWithinABucket(t *testing.T) {
+	v := assetValidator(t, "asset-secret-asset-secret")
+
+	sig := v.SignAsset("stream-1")
+	rawExp, _, ok := strings.Cut(sig, ".")
+	if !ok {
+		t.Fatalf("malformed signature %q", sig)
+	}
+	exp, err := strconv.ParseInt(rawExp, 10, 64)
+	if err != nil {
+		t.Fatalf("malformed expiry in %q: %v", sig, err)
+	}
+
+	bucketSecs := int64(assetSignatureBucket.Seconds())
+	if (exp-int64(AssetSignatureTTL.Seconds()))%bucketSecs != 0 {
+		t.Fatalf("expiry %d is not anchored to a %s bucket boundary; the signature will change on every playlist poll", exp, assetSignatureBucket)
+	}
+
+	// Repeated calls inside the same bucket must be byte-identical, which is what
+	// keeps the playlist stable between polls.
+	if again := v.SignAsset("stream-1"); again != sig {
+		t.Fatalf("signature changed between calls: %q then %q", sig, again)
+	}
+}
+
+// Bucketing shortens a signature's remaining life by at most one bucket. That
+// residue still has to comfortably outlast the gap between a playlist being
+// served and its fragments being fetched.
+func TestSignAssetKeepsUsefulLifetimeAfterBucketing(t *testing.T) {
+	v := assetValidator(t, "asset-secret-asset-secret")
+
+	sig := v.SignAsset("stream-1")
+	rawExp, _, _ := strings.Cut(sig, ".")
+	exp, err := strconv.ParseInt(rawExp, 10, 64)
+	if err != nil {
+		t.Fatalf("malformed expiry in %q: %v", sig, err)
+	}
+
+	remaining := time.Duration(exp-time.Now().Unix()) * time.Second
+	if floor := AssetSignatureTTL - assetSignatureBucket; remaining < floor {
+		t.Fatalf("remaining lifetime %s dropped below the %s floor", remaining, floor)
+	}
+	if remaining > AssetSignatureTTL {
+		t.Fatalf("remaining lifetime %s exceeds the declared TTL %s", remaining, AssetSignatureTTL)
 	}
 }

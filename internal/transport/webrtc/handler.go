@@ -47,10 +47,30 @@ type Handler struct {
 
 type MonitorMessage struct {
 	Type 	string 			`json:"type"`
-	Streams []usecase.StreamInfo `json:"streams,omitempty"`
+	// KHÔNG omitempty: một snapshot rỗng là thông tin có nghĩa - "hiện không ai
+	// đang stream" - chứ không phải trường thiếu. Với omitempty, ca thi chưa có
+	// ai lên sóng gửi đi đúng {"type":"snapshot"} và client nhận được undefined
+	// thay vì mảng rỗng. Các trường con trỏ bên dưới thì omitempty là đúng, vì ở
+	// đó vắng mặt thật sự nghĩa là "thông điệp này không thuộc loại ấy".
+	Streams []usecase.StreamInfo `json:"streams"`
 	Frame *FrameNotification `json:"frame,omitempty"`
 	Event *domain.ParticipantEvent `json:"event,omitempty"`
 	Alert *domain.AlertEvent `json:"alert,omitempty"`
+}
+
+// newSnapshotMessage builds a snapshot message whose Streams is never nil, so it
+// can never serialize to `"streams":null`.
+//
+// The invariant lives here rather than at the call site because the nil comes
+// from a path that is easy to overlook: GetScheduleSnapshot returns nil together
+// with an error, and the caller deliberately keeps going (a monitor that gets no
+// snapshot at all is worse than one that starts empty). Every future caller gets
+// the guarantee for free.
+func newSnapshotMessage(streams []usecase.StreamInfo) MonitorMessage {
+	if streams == nil {
+		streams = []usecase.StreamInfo{}
+	}
+	return MonitorMessage{Type: "snapshot", Streams: streams}
 }
 
 const (
@@ -233,10 +253,7 @@ func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.logger.Error("get schedule snapshot failed", zap.String("scheduleId", scheduleID), zap.Error(err))
 	}
-	_ = conn.WriteJSON(MonitorMessage{
-		Type: "snapshot", 
-		Streams: snapshot,
-	})
+	_ = conn.WriteJSON(newSnapshotMessage(snapshot))
 
 	frameCh := h.broadcaster.Subscribe(ctx, scheduleID)
 	eventCh := h.monitorUseCase.SubscribeEvents(ctx, scheduleID)

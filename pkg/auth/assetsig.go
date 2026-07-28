@@ -35,10 +35,30 @@ const assetSigBytes = 16
 // being fetched, while still bounding replay if a playlist URL leaks.
 const AssetSignatureTTL = 30 * time.Minute
 
+// assetSignatureBucket is the window over which SignAsset returns a byte-identical
+// string.
+//
+// The signature is part of the #EXT-X-MAP URI in every live-rewind playlist, and
+// hls.js identifies the init segment BY ITS URI: a changed URI is a different init
+// segment, so it refetches and re-appends it, which resets the decoder and shows
+// the viewer a buffering stall. Deriving exp straight from time.Now() changed the
+// signature every second, so every playlist poll (~once per target duration)
+// produced a fresh URI and a fresh stall — the exact buffer churn this file's
+// design was supposed to have eliminated when it replaced presigned S3 URLs.
+//
+// Quantising exp to a bucket boundary makes the whole playlist stable between
+// polls. The cost is only that a signature's remaining lifetime varies within
+// [TTL-bucket, TTL] instead of being exactly TTL; keep bucket well under TTL so
+// even a signature minted at the end of a bucket still outlives any reasonable
+// fetch delay.
+const assetSignatureBucket = 10 * time.Minute
+
 // SignAsset returns "<expUnix>.<sig>" authorizing reads of streamID's
-// live-rewind assets until now+AssetSignatureTTL.
+// live-rewind assets. The expiry is anchored to the current bucket boundary
+// rather than to the exact call time, so repeated calls within a bucket return
+// the same string — see assetSignatureBucket for why that matters.
 func (v *Validator) SignAsset(streamID string) string {
-	exp := time.Now().Add(AssetSignatureTTL).Unix()
+	exp := time.Now().Truncate(assetSignatureBucket).Add(AssetSignatureTTL).Unix()
 	return fmt.Sprintf("%d.%s", exp, v.assetMAC(streamID, exp))
 }
 

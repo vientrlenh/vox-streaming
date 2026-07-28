@@ -143,14 +143,20 @@ func main() {
 		logger.Fatal("grpc server create failed", zap.Error(err))
 	}
 
-	examClient, err := grpcClient.NewExamClient(grpcClient.ExamClientConfig{
-		Addr:   os.Getenv("EXAM_SERVICE_GRPC_ADDR"),
-		CAFile: os.Getenv("EXAM_SERVICE_CA_FILE"),
-		Token:  os.Getenv("GRPC_SERVICE_TOKEN"),
-	}, logger)
-	if err != nil {
-		logger.Fatal("grpc exam client create failed", zap.Error(err))
+	var examClient *grpcClient.ExamClient
+	if add := os.Getenv("EXAM_SERVICE_GRPC_ADDR"); add != "" {
+		examClient, err = grpcClient.NewExamClient(grpcClient.ExamClientConfig{
+			Addr:   os.Getenv("EXAM_SERVICE_GRPC_ADDR"),
+			CAFile: os.Getenv("EXAM_SERVICE_GRPC_CA_FILE"),
+			Token:  os.Getenv("GRPC_SERVICE_TOKEN"),
+		}, logger)
+		if err != nil {
+			logger.Fatal("grpc exam client create failed", zap.Error(err))
+		}
+	} else {
+		logger.Warn("exam grpc not configured")
 	}
+
 
 	go func() {
 		logger.Info("grpc server started", zap.String("addr", grpcAddr))

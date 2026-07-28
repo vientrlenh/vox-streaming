@@ -39,6 +39,9 @@ const (
 	// already dead at ExpiresAt, so nothing can be added past that point; this only absorbs clock
 	// skew between the session's own TTL and the sweep that acts on it.
 	assemblyWatchdogGrace = 2 * time.Minute
+
+	// How long an upload credential outlives the window it belong to. This is a data recovery window, not an authorization window: the client may have hours of buffered segments from a machine that was offline, and 410 Gone here means that evidence is gone for good
+	uploadCredentialGrade = 30 * time.Minute
 )
 
 type SegmentHandler struct {
@@ -481,8 +484,17 @@ func (h *SegmentHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The short-lived upload credential keeps retries possible after the stream
-	// JWT expires, without extending permission to open new recording streams.
+	// Deliberately NOT derived from the token's exp. The JWT's lifetime is how often permission
+	// gets re-checked; this is how long already-recorded evidence can still be pushed. Tying them
+	// together means a short-lived token both strands buffered segments and makes the assembly
+	// watchdog below (armed at ExpiresAt + grace) finalize a recording mid-exam.
+	//
+	// Never shorter than the old behaviour: only extends when the issuer says the schedule runs
+	// past the token
+	uploadWindowEnd := claims.ExpiresAt.Time.UTC()
+	if scheduleEnd, ok := claims.ScheduleEnd(); ok && scheduleEnd.After(uploadWindowEnd) {
+		uploadWindowEnd = scheduleEnd
+	}
 	expiresAt := claims.ExpiresAt.Time.UTC().Add(30 * time.Minute)
 	uploadToken, uploadTokenHash, err := newUploadToken()
 	if err != nil {

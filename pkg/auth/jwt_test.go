@@ -245,3 +245,22 @@ func TestMonitorClaims_CanMonitorSchedule(t *testing.T) {
 		t.Error("expected an invalid scope role to be denied even if schedule matches")
 	}
 }
+
+func TestStreawmClaims_ScheduleEnd(t *testing.T) {
+	var missing StreamClaims
+	if _, ok := missing.ScheduleEnd(); ok {
+		t.Fatal("absent scheduleEndAt should not report a schedule end")
+	}
+
+	want := time.Now().Add(2 * time.Hour).Truncate(time.Second).UTC()
+	c := StreamClaims{
+		ScheduleEndAt: want.Unix(),
+	}
+	got, ok := c.ScheduleEnd()
+	if !ok {
+		t.Fatal("scheduleEndAt should report a schedule end")
+	}
+	if !got.Equal(want) {
+		t.Fatalf("schedule end = %s, want %s", got, want)
+	}
+}
