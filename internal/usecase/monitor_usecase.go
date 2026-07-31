@@ -196,7 +196,7 @@ func (u *MonitorUseCase) PublishAlert(ctx context.Context, alert domain.AlertEve
 	var durErr error
 	if u.alertPublisher != nil {
 		durErr = u.alertPublisher.PublishAlertRaised(ctx, domain.AlertRaisedEvent{
-			EventID: uuid.NewString(), 
+			EventID: eventID, 
 			RaisedAt: time.Now().UTC(),
 			AlertEvent: alert,
 		}, )
