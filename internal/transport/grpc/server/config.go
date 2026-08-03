@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	alertv1 "github.com/vientrlenh/vox-streaming/pkg/pb/alert/v1"
+	healthv1 "github.com/vientrlenh/vox-streaming/pkg/pb/health/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -32,7 +33,7 @@ type Server struct {
 	logger *zap.Logger
 }
 
-func NewServer(cfg ServerConfig, alertServer *AlertServer, logger *zap.Logger) (*Server, error) {
+func NewServer(cfg ServerConfig, alertServer *AlertServer, healthServer *HealthServer, logger *zap.Logger) (*Server, error) {
 	lis , err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
 		return nil, err
@@ -57,6 +58,7 @@ func NewServer(cfg ServerConfig, alertServer *AlertServer, logger *zap.Logger) (
 	
 	s := grpc.NewServer(serverOpts...)
 	alertv1.RegisterAlertServiceServer(s, alertServer)
+	healthv1.RegisterHealthServiceServer(s, healthServer)
 	return &Server{
 		grpcServer: s, 
 		listener: lis, 

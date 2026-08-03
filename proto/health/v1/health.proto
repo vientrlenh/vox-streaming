@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package health.v1;
+
+option go_package = "pkg/pb/health/v1;healthv1";
+
+service HealthService {
+    rpc Ping(HealthRequest) returns (HealthResponse);
+}
+
+message HealthRequest {
+
+}
+
+message HealthResponse {
+    bool alive = 1;
+    string message = 2;
+}

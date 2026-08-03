@@ -21,6 +21,7 @@ import (
 	"github.com/vientrlenh/vox-streaming/internal/domain"
 	recordHandler "github.com/vientrlenh/vox-streaming/internal/handler/recording"
 	segmentHandler "github.com/vientrlenh/vox-streaming/internal/handler/segment"
+	"github.com/vientrlenh/vox-streaming/internal/healthcheck"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/queue"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
@@ -85,6 +86,8 @@ func main() {
 		frameIntervalSecs = 5
 	}
 
+	storageClient := ensureStorage(startupCtx, logger)
+
 	// Build the shared WebRTC API once. WEBRTC_UDP_PORT muxes all peer media onto
 	// a single UDP port (expose just that port in containers); WEBRTC_NAT_1TO1_IP
 	// advertises the server's public IP for host candidates behind a 1:1 NAT.
@@ -125,23 +128,12 @@ func main() {
 	streamUseCase := usecase.NewStreamUseCase(publisher, sessionRegistry, logger)
 	monitorUseCase := usecase.NewMonitorUseCase(sessionRegistry, broadCaster, broadCaster, publisher, logger)
 
-	alertServer := grpcServer.NewAlertServer(monitorUseCase, logger)
+	hc := healthcheck.NewHealthChecker(redisClient, kafkaCfg.Brokers, kafkaCfg, storageClient)
+	health := httpRoute.NewHealthInfo(hc)
+	go func() {
+		httpRoute.RunMetric(health, logger)
+	}()	
 
-	grpcAddr := os.Getenv("GRPC_ADDR")
-	if grpcAddr == "" {
-		grpcAddr = ":9091"
-	}
-
-	grpcServer, err := grpcServer.NewServer(grpcServer.ServerConfig{
-		Addr:     grpcAddr,
-		CertFile: os.Getenv("GRPC_CERT_FILE"),
-		KeyFile:  os.Getenv("GRPC_KEY_FILE"),
-		CAFile:   os.Getenv("GRPC_CA_FILE"),
-		APIKey:   os.Getenv("GRPC_SERVICE_TOKEN"),
-	}, alertServer, logger)
-	if err != nil {
-		logger.Fatal("grpc server create failed", zap.Error(err))
-	}
 
 	var examClient *grpcClient.ExamClient
 	if add := os.Getenv("EXAM_SERVICE_GRPC_ADDR"); add != "" {
@@ -157,6 +149,24 @@ func main() {
 		logger.Warn("exam grpc not configured")
 	}
 
+	alertServer := grpcServer.NewAlertServer(monitorUseCase, logger)
+	healthServer := grpcServer.NewHealthServer(logger, hc)
+
+	grpcAddr := os.Getenv("GRPC_ADDR")
+	if grpcAddr == "" {
+		grpcAddr = ":9091"
+	}
+
+	grpcServer, err := grpcServer.NewServer(grpcServer.ServerConfig{
+		Addr:     grpcAddr,
+		CertFile: os.Getenv("GRPC_CERT_FILE"),
+		KeyFile:  os.Getenv("GRPC_KEY_FILE"),
+		CAFile:   os.Getenv("GRPC_CA_FILE"),
+		APIKey:   os.Getenv("GRPC_SERVICE_TOKEN"),
+	}, alertServer, healthServer, logger)
+	if err != nil {
+		logger.Fatal("grpc server create failed", zap.Error(err))
+	}
 
 	go func() {
 		logger.Info("grpc server started", zap.String("addr", grpcAddr))
@@ -165,7 +175,6 @@ func main() {
 		}
 	}()
 
-	storageClient := ensureStorage(startupCtx, logger)
 	segmentRegistry := cache.NewSegmentRegistry(redisClient)
 	// What the client says it captured, which is what gap detection is measured against -- without
 	// it a stream that simply stops early is indistinguishable from a complete one.
@@ -457,11 +466,6 @@ func main() {
 	}()
 
 	go monitor.Run(runCtx)
-
-	hc := httpRoute.NewHealthChecker(redisClient, kafkaCfg.Brokers, kafkaCfg, storageClient, examClient)
-	go func() {
-		httpRoute.RunMetric(hc, logger)
-	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
