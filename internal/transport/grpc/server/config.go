@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 )
 
@@ -59,6 +60,8 @@ func NewServer(cfg ServerConfig, alertServer *AlertServer, healthServer *HealthS
 	s := grpc.NewServer(serverOpts...)
 	alertv1.RegisterAlertServiceServer(s, alertServer)
 	healthv1.RegisterHealthServiceServer(s, healthServer)
+	// Lets grpcurl/Postman discover the registered services without a local .proto copy.
+	reflection.Register(s)
 	return &Server{
 		grpcServer: s, 
 		listener: lis, 
