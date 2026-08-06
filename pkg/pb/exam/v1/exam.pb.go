@@ -23,10 +23,10 @@ const (
 
 type ValidateAccessRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ScheduleId    string                 `protobuf:"bytes,1,opt,name=scheduleId,proto3" json:"scheduleId,omitempty"`
-	CandidateId   string                 `protobuf:"bytes,2,opt,name=candidateId,proto3" json:"candidateId,omitempty"`
-	StreamType    string                 `protobuf:"bytes,3,opt,name=streamType,proto3" json:"streamType,omitempty"`
-	ExamSessionId string                 `protobuf:"bytes,4,opt,name=examSessionId,proto3" json:"examSessionId,omitempty"`
+	ScheduleId    string                 `protobuf:"bytes,1,opt,name=schedule_id,json=scheduleId,proto3" json:"schedule_id,omitempty"`
+	CandidateId   string                 `protobuf:"bytes,2,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`
+	StreamType    string                 `protobuf:"bytes,3,opt,name=stream_type,json=streamType,proto3" json:"stream_type,omitempty"`
+	ExamSessionId string                 `protobuf:"bytes,4,opt,name=exam_session_id,json=examSessionId,proto3" json:"exam_session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -143,10 +143,10 @@ func (x *ValidateAccessResponse) GetReason() string {
 
 type UpdateRecordingRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	StreamId      string                 `protobuf:"bytes,1,opt,name=streamId,proto3" json:"streamId,omitempty"`
-	ScheduleId    string                 `protobuf:"bytes,2,opt,name=scheduleId,proto3" json:"scheduleId,omitempty"`
-	RecordingUrl  string                 `protobuf:"bytes,3,opt,name=recordingUrl,proto3" json:"recordingUrl,omitempty"`
-	DurationSecs  int64                  `protobuf:"varint,4,opt,name=durationSecs,proto3" json:"durationSecs,omitempty"`
+	StreamId      string                 `protobuf:"bytes,1,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
+	ScheduleId    string                 `protobuf:"bytes,2,opt,name=schedule_id,json=scheduleId,proto3" json:"schedule_id,omitempty"`
+	RecordingUrl  string                 `protobuf:"bytes,3,opt,name=recording_url,json=recordingUrl,proto3" json:"recording_url,omitempty"`
+	DurationSecs  int64                  `protobuf:"varint,4,opt,name=duration_secs,json=durationSecs,proto3" json:"duration_secs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -257,26 +257,23 @@ var File_exam_v1_exam_proto protoreflect.FileDescriptor
 
 const file_exam_v1_exam_proto_rawDesc = "" +
 	"\n" +
-	"\x12exam/v1/exam.proto\x12\aexam.v1\"\x9f\x01\n" +
-	"\x15ValidateAccessRequest\x12\x1e\n" +
-	"\n" +
-	"scheduleId\x18\x01 \x01(\tR\n" +
-	"scheduleId\x12 \n" +
-	"\vcandidateId\x18\x02 \x01(\tR\vcandidateId\x12\x1e\n" +
-	"\n" +
-	"streamType\x18\x03 \x01(\tR\n" +
-	"streamType\x12$\n" +
-	"\rexamSessionId\x18\x04 \x01(\tR\rexamSessionId\"J\n" +
+	"\x12exam/v1/exam.proto\x12\aexam.v1\"\xa4\x01\n" +
+	"\x15ValidateAccessRequest\x12\x1f\n" +
+	"\vschedule_id\x18\x01 \x01(\tR\n" +
+	"scheduleId\x12!\n" +
+	"\fcandidate_id\x18\x02 \x01(\tR\vcandidateId\x12\x1f\n" +
+	"\vstream_type\x18\x03 \x01(\tR\n" +
+	"streamType\x12&\n" +
+	"\x0fexam_session_id\x18\x04 \x01(\tR\rexamSessionId\"J\n" +
 	"\x16ValidateAccessResponse\x12\x18\n" +
 	"\aallowed\x18\x01 \x01(\bR\aallowed\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\"\x9c\x01\n" +
-	"\x16UpdateRecordingRequest\x12\x1a\n" +
-	"\bstreamId\x18\x01 \x01(\tR\bstreamId\x12\x1e\n" +
-	"\n" +
-	"scheduleId\x18\x02 \x01(\tR\n" +
-	"scheduleId\x12\"\n" +
-	"\frecordingUrl\x18\x03 \x01(\tR\frecordingUrl\x12\"\n" +
-	"\fdurationSecs\x18\x04 \x01(\x03R\fdurationSecs\"3\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"\xa0\x01\n" +
+	"\x16UpdateRecordingRequest\x12\x1b\n" +
+	"\tstream_id\x18\x01 \x01(\tR\bstreamId\x12\x1f\n" +
+	"\vschedule_id\x18\x02 \x01(\tR\n" +
+	"scheduleId\x12#\n" +
+	"\rrecording_url\x18\x03 \x01(\tR\frecordingUrl\x12#\n" +
+	"\rduration_secs\x18\x04 \x01(\x03R\fdurationSecs\"3\n" +
 	"\x17UpdateRecordingResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess2\xb6\x01\n" +
 	"\vExamService\x12Q\n" +

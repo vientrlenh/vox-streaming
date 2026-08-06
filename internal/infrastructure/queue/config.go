@@ -2,6 +2,8 @@ package queue
 
 import (
 	"time"
+
+	"github.com/segmentio/kafka-go"
 )
 
 type Config struct {
@@ -32,7 +34,16 @@ func DefaultConfig(brokers []string, groupID string) Config {
 		MinBytes:       1,
 		MaxBytes:       10 * 1024 * 1024,
 		CommitInterval: time.Second,
-		StartOffset:    -1,
+		// FirstOffset, not LastOffset, is the only safe default for a group that has no
+		// committed offset yet -- which is every group on a fresh deployment, and every
+		// group right up until its first successful commit. With LastOffset such a group
+		// silently jumps to the end of the log, so anything already produced is never
+		// seen. That quietly voided the whole CommitOnDLQFailure=false contract ("skip
+		// the commit so the message gets redelivered") for the very first message a
+		// group ever handled: the message stayed in the topic uncommitted, and was
+		// skipped anyway on the next start. Consumers whose data genuinely goes stale
+		// (frame.ready) override this back to LastOffset at their own call site.
+		StartOffset:    kafka.FirstOffset,
 		MaxWait:        500 * time.Millisecond,
 	}
 }

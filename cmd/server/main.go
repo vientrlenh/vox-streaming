@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,6 +19,9 @@ import (
 	"github.com/rs/cors"
 	"github.com/segmentio/kafka-go"
 	"github.com/vientrlenh/vox-streaming/internal/domain"
+	recordHandler "github.com/vientrlenh/vox-streaming/internal/handler/recording"
+	segmentHandler "github.com/vientrlenh/vox-streaming/internal/handler/segment"
+	"github.com/vientrlenh/vox-streaming/internal/healthcheck"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/cache"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/queue"
 	"github.com/vientrlenh/vox-streaming/internal/infrastructure/storage"
@@ -25,10 +29,9 @@ import (
 	grpcClient "github.com/vientrlenh/vox-streaming/internal/transport/grpc/client"
 	grpcServer "github.com/vientrlenh/vox-streaming/internal/transport/grpc/server"
 	httpRoute "github.com/vientrlenh/vox-streaming/internal/transport/http"
-	recordHandler "github.com/vientrlenh/vox-streaming/internal/handler/recording"
-	segmentHandler "github.com/vientrlenh/vox-streaming/internal/handler/segment"
 	webrtcTransport "github.com/vientrlenh/vox-streaming/internal/transport/webrtc"
 	"github.com/vientrlenh/vox-streaming/internal/usecase"
+	"github.com/vientrlenh/vox-streaming/internal/watcher"
 	"github.com/vientrlenh/vox-streaming/pkg/auth"
 	"go.uber.org/zap"
 )
@@ -83,6 +86,8 @@ func main() {
 		frameIntervalSecs = 5
 	}
 
+	storageClient := ensureStorage(startupCtx, logger)
+
 	// Build the shared WebRTC API once. WEBRTC_UDP_PORT muxes all peer media onto
 	// a single UDP port (expose just that port in containers); WEBRTC_NAT_1TO1_IP
 	// advertises the server's public IP for host candidates behind a 1:1 NAT.
@@ -123,7 +128,29 @@ func main() {
 	streamUseCase := usecase.NewStreamUseCase(publisher, sessionRegistry, logger)
 	monitorUseCase := usecase.NewMonitorUseCase(sessionRegistry, broadCaster, broadCaster, publisher, logger)
 
+	hc := healthcheck.NewHealthChecker(redisClient, kafkaCfg.Brokers, kafkaCfg, storageClient)
+	health := httpRoute.NewHealthInfo(hc)
+	go func() {
+		httpRoute.RunMetric(health, logger)
+	}()	
+
+
+	var examClient *grpcClient.ExamClient
+	if add := os.Getenv("EXAM_SERVICE_GRPC_ADDR"); add != "" {
+		examClient, err = grpcClient.NewExamClient(grpcClient.ExamClientConfig{
+			Addr:   os.Getenv("EXAM_SERVICE_GRPC_ADDR"),
+			CAFile: os.Getenv("EXAM_SERVICE_GRPC_CA_FILE"),
+			Token:  os.Getenv("GRPC_SERVICE_TOKEN"),
+		}, logger)
+		if err != nil {
+			logger.Fatal("grpc exam client create failed", zap.Error(err))
+		}
+	} else {
+		logger.Warn("exam grpc not configured")
+	}
+
 	alertServer := grpcServer.NewAlertServer(monitorUseCase, logger)
+	healthServer := grpcServer.NewHealthServer(logger, hc)
 
 	grpcAddr := os.Getenv("GRPC_ADDR")
 	if grpcAddr == "" {
@@ -136,18 +163,9 @@ func main() {
 		KeyFile:  os.Getenv("GRPC_KEY_FILE"),
 		CAFile:   os.Getenv("GRPC_CA_FILE"),
 		APIKey:   os.Getenv("GRPC_SERVICE_TOKEN"),
-	}, alertServer, logger)
+	}, alertServer, healthServer, logger)
 	if err != nil {
 		logger.Fatal("grpc server create failed", zap.Error(err))
-	}
-
-	examClient, err := grpcClient.NewExamClient(grpcClient.ExamClientConfig{
-		Addr:   os.Getenv("EXAM_SERVICE_GRPC_ADDR"),
-		CAFile: os.Getenv("EXAM_SERVICE_CA_FILE"),
-		Token:  os.Getenv("GRPC_SERVICE_TOKEN"),
-	}, logger)
-	if err != nil {
-		logger.Fatal("grpc exam client create failed", zap.Error(err))
 	}
 
 	go func() {
@@ -157,9 +175,11 @@ func main() {
 		}
 	}()
 
-	storageClient := ensureStorage(startupCtx, logger)
 	segmentRegistry := cache.NewSegmentRegistry(redisClient)
-	segmentUseCase := usecase.NewSegmentUseCase(storageClient, segmentRegistry, sessionRegistry, logger)
+	// What the client says it captured, which is what gap detection is measured against -- without
+	// it a stream that simply stops early is indistinguishable from a complete one.
+	inventoryRegistry := cache.NewInventoryRegistry(redisClient)
+	segmentUseCase := usecase.NewSegmentUseCase(storageClient, segmentRegistry, sessionRegistry, inventoryRegistry, logger)
 
 	// grace period the assembler waits after stream.ended for a client
 	// completion signal before assembling with whatever segments have arrived
@@ -168,14 +188,38 @@ func main() {
 		assemblyGraceSecs = 90
 	}
 	assemblerUseCase := usecase.NewAssemblerUseCase(
-		storageClient, segmentRegistry, sessionRegistry, publisher,
+		storageClient, segmentRegistry, inventoryRegistry, sessionRegistry, publisher,
 		time.Duration(assemblyGraceSecs)*time.Second,
 		logger,
 	)
-	segmentHandler := segmentHandler.NewSegmentHandler(segmentUseCase, publisher, jwtValidator, sessionRegistry, logger)
+	// Assembles recordings whose client never called /complete -- a crashed, shut down or
+	// permanently offline exam machine -- so segments already in S3 cannot be stranded as loose
+	// parts with nothing to turn them into a recording.mp4. See usecase.AssemblyWatchdog for why it
+	// fires on upload-session expiry rather than on an inactivity timeout.
+	pendingAssemblyRegistry := cache.NewPendingAssemblyRegistry(redisClient)
+	watchdogIntervalSecs, _ := strconv.Atoi(os.Getenv("ASSEMBLY_WATCHDOG_INTERVAL_SECS"))
+	assemblyWatchdog := watcher.NewAssemblyWatchdog(
+		pendingAssemblyRegistry,
+		segmentRegistry,
+		assemblerUseCase,
+		time.Duration(watchdogIntervalSecs)*time.Second,
+		logger,
+	)
+
+	segmentHandler := segmentHandler.NewSegmentHandler(segmentUseCase, publisher, jwtValidator, sessionRegistry, pendingAssemblyRegistry, logger)
 	recordingHandler := recordHandler.NewHandler(storageClient, os.Getenv("GRPC_SERVICE_TOKEN"), logger)
 
 	ffmpegIngestOpts := buildFFmpegIngestOptions(logger)
+	hlsFragmentRegistry := cache.NewHLSFragmentRegistry(redisClient)
+	// 0 is a meaningful value here — "no trailing window, serve the DVR from the
+	// stream's start" — so it must be distinguishable from the variable being
+	// unset, which still falls back to a 15-minute tail.
+	liveRewindWindow := 15 * time.Minute
+	if raw := os.Getenv("LIVE_REWIND_WINDOW_MINUTES"); raw != "" {
+		if mins, err := strconv.Atoi(raw); err == nil && mins >= 0 {
+			liveRewindWindow = time.Duration(mins) * time.Minute
+		}
+	}
 
 	tempDir := os.Getenv("SEGMENT_TEMP_DIR")
 	sweepTTLHours, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_TEMP_TTL_HOURS"))
@@ -211,6 +255,8 @@ func main() {
 		examClient,
 		storageClient,
 		segmentRegistry,
+		hlsFragmentRegistry,
+		liveRewindWindow,
 	)
 
 	addr := os.Getenv("WEBRTC_ADDR")
@@ -263,6 +309,12 @@ func main() {
 
 	frameConverterCfg := kafkaCfg
 	frameConverterCfg.GroupID = "vox-frame-converter"
+	// The one consumer that genuinely should skip a backlog: a frame is a periodic
+	// JPEG thumbnail for a monitor watching right now, worthless minutes later, and
+	// the topic keeps an hour of them across 12 partitions. Every other consumer
+	// keeps the FirstOffset default (see queue.DefaultConfig) so nothing durable is
+	// ever silently skipped.
+	frameConverterCfg.StartOffset = kafka.LastOffset
 	maxConv, _ := strconv.Atoi(os.Getenv("FRAME_CONVERT_CONCURRENCY"))
 	frameConvertUseCase := usecase.NewFrameConvertUseCase(storageClient, broadCaster, maxConv, logger)
 
@@ -407,12 +459,13 @@ func main() {
 		}
 	}()
 
-	go monitor.Run(runCtx)
-
-	hc := httpRoute.NewHealthChecker(redisClient, kafkaCfg.Brokers, kafkaCfg, storageClient, examClient)
 	go func() {
-		httpRoute.RunMetric(hc, logger)
+		if err := assemblyWatchdog.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("assembly watchdog error", zap.Error(err))
+		}
 	}()
+
+	go monitor.Run(runCtx)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
@@ -562,6 +615,18 @@ func buildFFmpegIngestOptions(logger *zap.Logger) webrtcTransport.FFmpegIngestOp
 
 	maxDelayMs, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_MAX_DELAY_MS"))
 
+	// Live-rewind HLS output — off by default. A separate, parallel ffmpeg
+	// output muxer alongside the archival one above; see recorder.HLSOptions.
+	hlsEnabled := os.Getenv("FFMPEG_INGEST_HLS_ENABLED") == "true"
+	hlsSegmentSeconds, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_HLS_SEGMENT_SECONDS"))
+	if hlsSegmentSeconds == 0 {
+		hlsSegmentSeconds = 4
+	}
+	hlsAudioBitrateK, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_HLS_AUDIO_BITRATE_K"))
+	if hlsAudioBitrateK == 0 {
+		hlsAudioBitrateK = 128
+	}
+
 	logger.Info("ffmpeg ingest bridge enabled",
 		zap.Int("portRangeStart", rangeStart),
 		zap.Int("portRangeEnd", rangeEnd),
@@ -571,6 +636,9 @@ func buildFFmpegIngestOptions(logger *zap.Logger) webrtcTransport.FFmpegIngestOp
 		zap.Int("stopTimeoutSecs", stopTimeoutSecs),
 		zap.Int("reorderQueueSize", reorderQueueSize),
 		zap.Int("maxDelayMs", maxDelayMs),
+		zap.Bool("hlsEnabled", hlsEnabled),
+		zap.Int("hlsSegmentSeconds", hlsSegmentSeconds),
+		zap.Int("hlsAudioBitrateK", hlsAudioBitrateK),
 	)
 	return webrtcTransport.FFmpegIngestOptions{
 		Allocator:          alloc,
@@ -580,6 +648,9 @@ func buildFFmpegIngestOptions(logger *zap.Logger) webrtcTransport.FFmpegIngestOp
 		MaxDelayMicros:     maxDelayMs * 1000,
 		MaxRestartAttempts: maxRestartAttempts,
 		StopTimeout:        time.Duration(stopTimeoutSecs) * time.Second,
+		HLSEnabled:         hlsEnabled,
+		HLSSegmentSeconds:  hlsSegmentSeconds,
+		HLSAudioBitrateK:   hlsAudioBitrateK,
 	}
 }
 
@@ -595,6 +666,10 @@ func ensureStorage(startupCtx context.Context, logger *zap.Logger) *storage.Clie
 	}
 	if b := os.Getenv("STORAGE_RECORDING_BUCKET"); b != "" {
 		storageCfg.RecordingBucket = b
+	}
+	
+	if r := os.Getenv("STORAGE_REGION"); r != "" {
+		storageCfg.Region = r
 	}
 	storageCfg.UseSSL = os.Getenv("STORAGE_USE_SSL") == "true"
 	if presignMins := os.Getenv("STORAGE_PRESIGN_MINUTES"); presignMins != "" {

@@ -1,25 +1,40 @@
 name: CD
 
-# Runs only after "CI" (ci.yml) finishes successfully on a push to `main` —
-# never on PRs, and never if build/test failed. Separate workflow so CI stays
-# a pure build+test gate, and docker build/push/GitOps-update only fire off
-# the back of a confirmed-green CI run for that exact commit.
+# Chỉ chạy sau khi "CI" (ci.yml) chạy xong THÀNH CÔNG cho một lần push lên `main`.
+# Tách khỏi CI để CI thuần là cổng build+test, còn docker build/push và cập nhật GitOps
+# chỉ nổ khi đã có một lần CI xanh cho đúng commit đó -- không bao giờ deploy một commit
+# chưa qua build/test.
+#
+# LƯU Ý VẬN HÀNH: workflow_run chỉ fire nếu chính file này (cd.yml) đã tồn tại trên nhánh
+# MẶC ĐỊNH của repo. Còn để trên nhánh thử (testDeploy...) thì cổng này không chạy lần nào,
+# và sẽ im lặng chứ không báo lỗi -- phải merge cd.yml (và ci.yml) vào main thật.
 on:
   workflow_run:
-    workflows: ["CI"]
-    types: [completed]
+    workflows:
+      - CI
+    types:
+      - completed
+    # Lọc ngay ở cửa cho rẻ; job bên dưới vẫn kiểm lại head_branch vì bộ lọc này chỉ nhìn
+    # nhánh của lần chạy CI, không thay được các điều kiện còn lại.
+    branches:
+      - main
 
 jobs:
   docker-build-push:
     name: Build Docker image and push to ECR
     runs-on: ubuntu-latest
+    # Ba điều kiện, thiếu cái nào cũng deploy nhầm:
+    #   conclusion == success  -- CI đỏ thì không được đẩy ảnh
+    #   event == 'push'        -- ci.yml chạy cả trên pull_request; không có vế này thì
+    #                             một PR xanh cũng kích deploy, dù chưa ai merge
+    #   head_branch == 'main'  -- chốt lại nhánh, khớp với bộ lọc ở trên
     if: >
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
     outputs:
-      ecr_image: ${{ steps.build.outputs.ecr_image }}
-      image_tag: ${{ steps.build.outputs.image_tag }}
+      ecr_image: ${{ steps.build_outputs.outputs.ecr_image }}
+      image_tag: ${{ steps.build_outputs.outputs.image_tag }}
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
@@ -27,8 +42,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          # Pin to the exact commit CI just passed on, not whatever `main`
-          # happens to point to right now (avoids a race with a later push).
+          # workflow_run chạy trong context nhánh mặc định TẠI LÚC đọc file workflow, KHÔNG
+          # phải commit mà CI vừa build. Phải ghim head_sha của lần chạy CI đó, nếu không sẽ
+          # build nhầm commit khi có push mới chen vào giữa.
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Configure AWS credentials
@@ -42,16 +58,34 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Compute image tag
+        id: tag
+        run: echo "tag=$(echo "${{ github.event.workflow_run.head_sha }}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build and push image
         id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.tag }}
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          # Layer cache đặt trong chính cache backend của GitHub Actions -- lớp không đổi
+          # (`go mod download` chẳng hạn) được dùng lại giữa các lần chạy thay vì build lại
+          # từ đầu mỗi lần. `mode=max` cache cả lớp trung gian của các build stage, không chỉ
+          # ảnh cuối.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Set job outputs
+        id: build_outputs
         run: |
-          IMAGE_TAG=$(echo "${{ github.event.workflow_run.head_sha }}" | cut -c1-7)
-          IMAGE_NAME=${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}
-          docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" -t "${IMAGE_NAME}:latest" .
-          docker push "${IMAGE_NAME}:${IMAGE_TAG}"
-          docker push "${IMAGE_NAME}:latest"
-          echo "ecr_image=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
-          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "ecr_image=${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${{ steps.tag.outputs.tag }}" >> "$GITHUB_OUTPUT"
 
   update-helm:
     name: Update vox-helm image tag
@@ -75,7 +109,11 @@ jobs:
       - name: Update values.yaml
         run: |
           cd helm-repo
-          yq eval '.image.repository = env(ECR_IMAGE) | .image.tag = env(IMAGE_TAG)' -i charts/vox-streaming/values.yaml
+          # strenv() chứ KHÔNG phải env(): tag là 7 ký tự đầu của git sha, nên có khoảng 4%
+          # khả năng toàn chữ số. Lúc đó env() để yq tự suy kiểu và ghi ra một SỐ -- tag
+          # "0123456" thành 123456, "1234e56" thành ký hiệu khoa học. strenv() ép chuỗi nên
+          # tag luôn giữ nguyên văn.
+          yq eval '.image.repository = env(ECR_IMAGE) | .image.tag = strenv(IMAGE_TAG)' -i charts/vox-streaming/values.yaml
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           if ! git diff --quiet; then

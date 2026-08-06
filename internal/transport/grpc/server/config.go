@@ -10,11 +10,13 @@ import (
 	"strings"
 
 	alertv1 "github.com/vientrlenh/vox-streaming/pkg/pb/alert/v1"
+	healthv1 "github.com/vientrlenh/vox-streaming/pkg/pb/health/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 )
 
@@ -32,7 +34,7 @@ type Server struct {
 	logger *zap.Logger
 }
 
-func NewServer(cfg ServerConfig, alertServer *AlertServer, logger *zap.Logger) (*Server, error) {
+func NewServer(cfg ServerConfig, alertServer *AlertServer, healthServer *HealthServer, logger *zap.Logger) (*Server, error) {
 	lis , err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
 		return nil, err
@@ -57,6 +59,9 @@ func NewServer(cfg ServerConfig, alertServer *AlertServer, logger *zap.Logger) (
 	
 	s := grpc.NewServer(serverOpts...)
 	alertv1.RegisterAlertServiceServer(s, alertServer)
+	healthv1.RegisterHealthServiceServer(s, healthServer)
+	// Lets grpcurl/Postman discover the registered services without a local .proto copy.
+	reflection.Register(s)
 	return &Server{
 		grpcServer: s, 
 		listener: lis, 

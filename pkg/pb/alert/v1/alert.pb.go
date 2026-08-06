@@ -23,16 +23,16 @@ const (
 
 type PushAlertRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ScheduleId    string                 `protobuf:"bytes,1,opt,name=scheduleId,proto3" json:"scheduleId,omitempty"`
-	ParticipantId string                 `protobuf:"bytes,2,opt,name=participantId,proto3" json:"participantId,omitempty"`
-	StreamId      string                 `protobuf:"bytes,3,opt,name=streamId,proto3" json:"streamId,omitempty"`
-	AlertType     string                 `protobuf:"bytes,4,opt,name=alertType,proto3" json:"alertType,omitempty"`
+	ScheduleId    string                 `protobuf:"bytes,1,opt,name=schedule_id,json=scheduleId,proto3" json:"schedule_id,omitempty"`
+	ParticipantId string                 `protobuf:"bytes,2,opt,name=participant_id,json=participantId,proto3" json:"participant_id,omitempty"`
+	StreamId      string                 `protobuf:"bytes,3,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
+	AlertType     string                 `protobuf:"bytes,4,opt,name=alert_type,json=alertType,proto3" json:"alert_type,omitempty"`
 	Confidence    float32                `protobuf:"fixed32,5,opt,name=confidence,proto3" json:"confidence,omitempty"`
-	CapturedAtMs  int64                  `protobuf:"varint,6,opt,name=capturedAtMs,proto3" json:"capturedAtMs,omitempty"`
-	EventId       string                 `protobuf:"bytes,7,opt,name=eventId,proto3" json:"eventId,omitempty"`
-	StreamType    string                 `protobuf:"bytes,8,opt,name=streamType,proto3" json:"streamType,omitempty"`
+	CapturedAtMs  int64                  `protobuf:"varint,6,opt,name=captured_at_ms,json=capturedAtMs,proto3" json:"captured_at_ms,omitempty"`
+	EventId       string                 `protobuf:"bytes,7,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	StreamType    string                 `protobuf:"bytes,8,opt,name=stream_type,json=streamType,proto3" json:"stream_type,omitempty"`
 	Detail        string                 `protobuf:"bytes,9,opt,name=detail,proto3" json:"detail,omitempty"`
-	SequenceNo    int64                  `protobuf:"varint,10,opt,name=sequenceNo,proto3" json:"sequenceNo,omitempty"`
+	SequenceNo    int64                  `protobuf:"varint,10,opt,name=sequence_no,json=sequenceNo,proto3" json:"sequence_no,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -185,25 +185,23 @@ var File_alert_v1_alert_proto protoreflect.FileDescriptor
 
 const file_alert_v1_alert_proto_rawDesc = "" +
 	"\n" +
-	"\x14alert/v1/alert.proto\x12\balert.v1\"\xc8\x02\n" +
-	"\x10PushAlertRequest\x12\x1e\n" +
+	"\x14alert/v1/alert.proto\x12\balert.v1\"\xd1\x02\n" +
+	"\x10PushAlertRequest\x12\x1f\n" +
+	"\vschedule_id\x18\x01 \x01(\tR\n" +
+	"scheduleId\x12%\n" +
+	"\x0eparticipant_id\x18\x02 \x01(\tR\rparticipantId\x12\x1b\n" +
+	"\tstream_id\x18\x03 \x01(\tR\bstreamId\x12\x1d\n" +
 	"\n" +
-	"scheduleId\x18\x01 \x01(\tR\n" +
-	"scheduleId\x12$\n" +
-	"\rparticipantId\x18\x02 \x01(\tR\rparticipantId\x12\x1a\n" +
-	"\bstreamId\x18\x03 \x01(\tR\bstreamId\x12\x1c\n" +
-	"\talertType\x18\x04 \x01(\tR\talertType\x12\x1e\n" +
+	"alert_type\x18\x04 \x01(\tR\talertType\x12\x1e\n" +
 	"\n" +
 	"confidence\x18\x05 \x01(\x02R\n" +
-	"confidence\x12\"\n" +
-	"\fcapturedAtMs\x18\x06 \x01(\x03R\fcapturedAtMs\x12\x18\n" +
-	"\aeventId\x18\a \x01(\tR\aeventId\x12\x1e\n" +
-	"\n" +
-	"streamType\x18\b \x01(\tR\n" +
+	"confidence\x12$\n" +
+	"\x0ecaptured_at_ms\x18\x06 \x01(\x03R\fcapturedAtMs\x12\x19\n" +
+	"\bevent_id\x18\a \x01(\tR\aeventId\x12\x1f\n" +
+	"\vstream_type\x18\b \x01(\tR\n" +
 	"streamType\x12\x16\n" +
-	"\x06detail\x18\t \x01(\tR\x06detail\x12\x1e\n" +
-	"\n" +
-	"sequenceNo\x18\n" +
+	"\x06detail\x18\t \x01(\tR\x06detail\x12\x1f\n" +
+	"\vsequence_no\x18\n" +
 	" \x01(\x03R\n" +
 	"sequenceNo\"/\n" +
 	"\x11PushAlertResponse\x12\x1a\n" +

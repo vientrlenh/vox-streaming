@@ -3,6 +3,8 @@ package queue
 import (
 	"testing"
 	"time"
+
+	"github.com/segmentio/kafka-go"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -36,8 +38,11 @@ func TestDefaultConfig(t *testing.T) {
 	if got.CommitInterval != time.Second {
 		t.Errorf("got CommitInterval=%v, want 1s", got.CommitInterval)
 	}
-	if got.StartOffset != -1 {
-		t.Errorf("got StartOffset=%d, want -1", got.StartOffset)
+	// A group with no committed offset must start at the beginning, not the end:
+	// LastOffset there silently skips everything already produced, including a
+	// message a previous run deliberately left uncommitted for redelivery.
+	if got.StartOffset != kafka.FirstOffset {
+		t.Errorf("got StartOffset=%d, want kafka.FirstOffset (%d)", got.StartOffset, kafka.FirstOffset)
 	}
 	if got.MaxWait != 500*time.Millisecond {
 		t.Errorf("got MaxWait=%v, want 500ms", got.MaxWait)

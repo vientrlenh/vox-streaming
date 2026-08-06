@@ -10,10 +10,10 @@ service ExamService {
 }
 
 message ValidateAccessRequest {
-    string scheduleId = 1;
-    string candidateId = 2;
-    string streamType = 3;
-    string examSessionId = 4;
+    string schedule_id = 1;
+    string candidate_id = 2;
+    string stream_type = 3;
+    string exam_session_id = 4;
 }
 
 message ValidateAccessResponse {
@@ -22,10 +22,10 @@ message ValidateAccessResponse {
 }
 
 message UpdateRecordingRequest {
-    string streamId = 1;
-    string scheduleId = 2;
-    string recordingUrl = 3;
-    int64 durationSecs = 4;
+    string stream_id = 1;
+    string schedule_id = 2;
+    string recording_url = 3;
+    int64 duration_secs = 4;
 }
 
 message UpdateRecordingResponse {

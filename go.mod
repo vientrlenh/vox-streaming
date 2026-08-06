@@ -19,10 +19,15 @@ require (
 	github.com/redis/go-redis/v9 v9.20.0
 	github.com/segmentio/kafka-go v0.4.51
 	go.uber.org/zap v1.28.0
-	golang.org/x/sync v0.21.0
-	golang.org/x/sys v0.42.0
-	google.golang.org/grpc v1.81.1
+	golang.org/x/sync v0.22.0
+	golang.org/x/sys v0.47.0
+	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
+)
+
+require (
+	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 )
 
 require (
@@ -41,7 +46,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.43.3 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pierrec/lz4/v4 v4.1.15 // indirect
 	github.com/pion/datachannel v1.6.0 // indirect
@@ -68,9 +73,9 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	golang.org/x/crypto v0.48.0 // indirect
-	golang.org/x/net v0.51.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
+	golang.org/x/crypto v0.54.0 // indirect
+	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
 )

@@ -1,6 +1,8 @@
 .env
 .DS_Store
 .claude/
-demo/
-scripts/
 docs/
+
+# Compiled test binaries. Windows Application Control blocks `go test` from running the binaries it
+# builds into %TEMP%, so they are built into the repo instead (go test -c -o .gotest/x.test.exe).
+.gotest/

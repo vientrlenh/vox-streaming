@@ -134,6 +134,11 @@ type UploadSession struct {
 	ExpiresAt       time.Time `json:"expiresAt"`
 	Completed       bool      `json:"completed"`
 	UploadTokenHash string    `json:"uploadTokenHash"`
+	// StopReason is why the client stopped recording, as reported on /complete. Empty when the
+	// client did not say -- an older client, or an assembly the watchdog drove because the client
+	// never called /complete at all. That emptiness is itself informative: it means nobody
+	// reported a clean end to this stream.
+	StopReason string `json:"stopReason,omitempty"`
 }
 
 func uploadSessionKey(streamID string) string {
@@ -229,6 +234,16 @@ func (r *SessionRegistry) LookupUpload(ctx context.Context, streamID string) (*U
 	return &session, nil
 }
 
+// The stop reason is recorded even on a repeat call that returns 0, and even though such a call
+// changes nothing else. A client that crashed mid-completion and retried is exactly the case where
+// the reason is worth having, and refusing to record it because the session was already closed
+// would drop it in the one situation it explains something.
+//
+// First writer wins, though, because the later caller is the one more likely to be guessing. A run
+// that completes normally reports why it stopped; if it then dies before recording that locally,
+// startup recovery re-completes the same stream and reports RecoveredAfterCrash -- which is true of
+// that run, but not of the recording, and overwriting with it would replace an observed reason with
+// a salvage marker. An absent reason is still filled in by whoever does turn up with one.
 var markUploadCompleteScript = redis.NewScript(`
 local raw = redis.call("GET", KEYS[1])
 if not raw then
@@ -236,22 +251,31 @@ if not raw then
 end
 
 local session = cjson.decode(raw)
-if session.completed then
-  return 0
-end
+local already = session.completed
 
+if ARGV[1] ~= "" and (session.stopReason == nil or session.stopReason == "") then
+  session.stopReason = ARGV[1]
+end
 session.completed = true
 redis.call("SET", KEYS[1], cjson.encode(session), "KEEPTTL")
+
+if already then
+  return 0
+end
 return 1
 `)
 
 // MarkUploadComplete atomically closes the upload session while preserving its
 // existing expiry. The bool is false when the session was already complete.
-func (r *SessionRegistry) MarkUploadComplete(ctx context.Context, streamID string) (bool, error) {
+//
+// stopReason may be empty: older clients send no body on /complete, and the watchdog path has no
+// client to ask.
+func (r *SessionRegistry) MarkUploadComplete(ctx context.Context, streamID, stopReason string) (bool, error) {
 	result, err := markUploadCompleteScript.Run(
 		ctx,
 		r.client,
 		[]string{uploadSessionKey(streamID)},
+		stopReason,
 	).Int64()
 	if err != nil {
 		return false, fmt.Errorf("mark upload session complete: %w", err)

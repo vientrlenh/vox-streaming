@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vientrlenh/vox-streaming/internal/watcher"
 	"go.uber.org/zap"
 )
 
@@ -36,9 +37,11 @@ type RecorderSupervisor struct {
 	maxAttempts      int
 	stopTimeout      time.Duration // grace period for a soft "q" quit before force-killing; see StartRecorderSupervisor
 	requestKeyframe  func()        // see StartRecorderSupervisor
+	hls              HLSOptions
 	logger           *zap.Logger
 
 	segCh  chan string
+	hlsCh  chan watcher.HLSFragmentEvent
 	stopCh chan struct{}
 	doneCh chan struct{}
 	gaveUp atomic.Bool
@@ -48,14 +51,14 @@ type RecorderSupervisor struct {
 	stopProcessOnce sync.Once
 }
 
-func StartRecorderSupervisor(sdpPath, baseOutDir string, segmentSeconds, reorderQueueSize, maxDelayMicros, maxAttempts int, stopTimeout time.Duration, requestKeyframe func(), logger *zap.Logger) (*RecorderSupervisor, error) {
+func StartRecorderSupervisor(sdpPath, baseOutDir string, segmentSeconds, reorderQueueSize, maxDelayMicros, maxAttempts int, stopTimeout time.Duration, requestKeyframe func(), hls HLSOptions, logger *zap.Logger) (*RecorderSupervisor, error) {
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
 	if stopTimeout <= 0 {
 		stopTimeout = defaultAttemptStopTimeout
 	}
-	rec, err := StartRecorder(sdpPath, filepath.Join(baseOutDir, "attempt-1"), segmentSeconds, reorderQueueSize, maxDelayMicros, logger)
+	rec, err := StartRecorder(sdpPath, filepath.Join(baseOutDir, "attempt-1"), segmentSeconds, reorderQueueSize, maxDelayMicros, hls, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -69,8 +72,10 @@ func StartRecorderSupervisor(sdpPath, baseOutDir string, segmentSeconds, reorder
 		maxAttempts:      maxAttempts,
 		stopTimeout:      stopTimeout,
 		requestKeyframe:  requestKeyframe,
+		hls:              hls,
 		logger:           logger,
 		segCh:            make(chan string),
+		hlsCh:            make(chan watcher.HLSFragmentEvent),
 		stopCh:           make(chan struct{}),
 		doneCh:           make(chan struct{}),
 		cur:              rec,
@@ -91,6 +96,7 @@ func (s *RecorderSupervisor) primeKeyframe() {
 func (s *RecorderSupervisor) run(rec *Recorder, attempt int) {
 	defer close(s.doneCh)
 	defer close(s.segCh)
+	defer close(s.hlsCh)
 
 	failStreak := 0
 	totalRestarts := 0
@@ -107,7 +113,26 @@ func (s *RecorderSupervisor) run(rec *Recorder, attempt int) {
 		default:
 		}
 
-		producedAny := s.forwardSegments(rec)
+		// The archival and HLS outputs are two muxers of the SAME ffmpeg
+		// process/attempt, so they must be drained concurrently — each call
+		// blocks until rec.Done(), and a sequential second call would only
+		// forward HLS fragments in a burst after the whole attempt ends,
+		// defeating live delivery for the duration of a multi-hour exam.
+		var wg sync.WaitGroup
+		var producedAny bool
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			producedAny = s.forwardSegments(rec)
+		}()
+		if s.hls.Enabled {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				s.forwardHLSFragments(rec, attempt)
+			}()
+		}
+		wg.Wait()
 
 		if rec.WasStopped() {
 			return
@@ -153,7 +178,7 @@ func (s *RecorderSupervisor) run(rec *Recorder, attempt int) {
 
 		attempt++
 		outDir := filepath.Join(s.baseOutDir, fmt.Sprintf("attempt-%d", attempt))
-		next, err := StartRecorder(s.sdpPath, outDir, s.segmentSeconds, s.reorderQueueSize, s.maxDelayMicros, s.logger)
+		next, err := StartRecorder(s.sdpPath, outDir, s.segmentSeconds, s.reorderQueueSize, s.maxDelayMicros, s.hls, s.logger)
 		if err != nil {
 			s.logger.Warn("ffmpeg recorder restart failed", zap.Int("attempt", attempt), zap.Error(err))
 			s.gaveUp.Store(true)
@@ -173,7 +198,7 @@ func (s *RecorderSupervisor) forwardSegments(rec *Recorder) (producedAny bool) {
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		for path := range WatchSegments(watchCtx, rec.SegmentListPath(), rec.OutputDir()) {
+		for path := range watcher.WatchSegments(watchCtx, rec.SegmentListPath(), rec.OutputDir()) {
 			producedAny = true
 			s.segCh <- path
 		}
@@ -188,6 +213,38 @@ func (s *RecorderSupervisor) forwardSegments(rec *Recorder) (producedAny bool) {
 
 func (s *RecorderSupervisor) Segments() <-chan string {
 	return s.segCh
+}
+
+// forwardHLSFragments mirrors forwardSegments for the parallel HLS output.
+// It does not participate in restart/backoff decisions (see run()) — an
+// HLS-only hiccup must never interrupt an otherwise-healthy archival attempt,
+// so its return is intentionally discarded by the caller.
+func (s *RecorderSupervisor) forwardHLSFragments(rec *Recorder, attempt int) {
+	if rec.HLSDir() == "" {
+		return
+	}
+	watchCtx, watchCancel := context.WithCancel(context.Background())
+	defer watchCancel()
+
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for evt := range watcher.WatchHLSFragments(watchCtx, rec.HLSDir(), attempt) {
+			s.hlsCh <- evt
+		}
+	}()
+
+	<-rec.Done()
+	watchCancel()
+	<-drained
+}
+
+// HLSFragments streams newly-completed local HLS assets (init segment +
+// media fragments) across every attempt of this supervisor's lifetime. Closed
+// once the supervisor's run loop exits. Empty/never-sent-to if HLSOptions.Enabled
+// was false.
+func (s *RecorderSupervisor) HLSFragments() <-chan watcher.HLSFragmentEvent {
+	return s.hlsCh
 }
 
 

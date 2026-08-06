@@ -26,6 +26,7 @@ type Recorder struct {
 	stdin           io.WriteCloser
 	outDir          string
 	segmentListPath string
+	hlsDir          string // "" when HLSOptions.Enabled was false for this attempt
 	logger          *zap.Logger
 
 	done chan struct{}
@@ -36,13 +37,29 @@ type Recorder struct {
 	forceKilled   atomic.Bool // true if the process didn't quit gracefully within its stop timeout and had to be SIGKILL'd — the segment it was mid-write on is likely truncated/corrupt
 }
 
+// HLSOptions configures an additional, parallel HLS (fMP4) output for live
+// DVR viewing. When Enabled, ffmpeg fans the same input out to a second
+// output muxer alongside the existing archival -f segment output — video
+// stays -c copy in both, audio is transcoded to AAC only for this output
+// (Safari's native HLS engine cannot decode Opus, unlike the archival copy
+// which is never played back by a browser directly).
+type HLSOptions struct {
+	Enabled        bool
+	SegmentSeconds int
+	AudioBitrateK  int
+}
+
 
 
 const defaultReorderQueueSize = 256
 
 const defaultMaxDelayMicros = 500000
 
-func StartRecorder(sdpPath, outDir string, segmentSeconds, reorderQueueSize, maxDelayMicros int, logger *zap.Logger) (*Recorder, error) {
+const defaultHLSSegmentSeconds = 4
+
+const defaultHLSAudioBitrateK = 128
+
+func StartRecorder(sdpPath, outDir string, segmentSeconds, reorderQueueSize, maxDelayMicros int, hls HLSOptions, logger *zap.Logger) (*Recorder, error) {
 	if err := os.MkdirAll(outDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create ffmpeg ingest output dir: %w", err)
 	}
@@ -55,7 +72,7 @@ func StartRecorder(sdpPath, outDir string, segmentSeconds, reorderQueueSize, max
 
 	segmentListPath := filepath.Join(outDir, "segment_list.txt")
 
-	cmd := exec.Command("ffmpeg",
+	args := []string{
 		"-hide_banner", "-loglevel", "warning",
 		"-protocol_whitelist", "file,udp,rtp",
 		"-reorder_queue_size", strconv.Itoa(reorderQueueSize),
@@ -71,8 +88,54 @@ func StartRecorder(sdpPath, outDir string, segmentSeconds, reorderQueueSize, max
 		"-segment_list_type", "flat",
 		"-movflags", "+frag_keyframe+empty_moov+default_base_moof",
 		filepath.Join(outDir, "%04d.mp4"),
-	)
+	}
+
+	var hlsDir string
+	if hls.Enabled {
+		hlsDir = filepath.Join(outDir, "hls")
+		if err := os.MkdirAll(hlsDir, 0o700); err != nil {
+			return nil, fmt.Errorf("create hls ingest output dir: %w", err)
+		}
+		audioBitrateK := hls.AudioBitrateK
+		if audioBitrateK <= 0 {
+			audioBitrateK = defaultHLSAudioBitrateK
+		}
+		hlsSegmentSeconds := hls.SegmentSeconds
+		if hlsSegmentSeconds <= 0 {
+			hlsSegmentSeconds = defaultHLSSegmentSeconds
+		}
+		args = append(args,
+			"-map", "0:v:0", "-map", "0:a:0",
+			"-c:v", "copy",
+			"-c:a", "aac", "-b:a", strconv.Itoa(audioBitrateK)+"k",
+			"-f", "hls",
+			"-hls_time", strconv.Itoa(hlsSegmentSeconds),
+			"-hls_list_size", "0",
+			"-hls_playlist_type", "event",
+			"-hls_segment_type", "fmp4",
+			"-hls_fmp4_init_filename", "init.mp4",
+			// temp_file: ffmpeg writes each playlist update to a temp file then
+			// renames it into place, so WatchHLSFragments's 1s poll of live.m3u8
+			// (hls_watch.go) always sees either the old or the new complete
+			// version -- never a torn/partial rewrite mid-write.
+			"-hls_flags", "independent_segments+temp_file",
+			"-max_muxing_queue_size", "1024",
+			"-hls_segment_filename", filepath.Join(hlsDir, "%06d.m4s"),
+			filepath.Join(hlsDir, "live.m3u8"),
+		)
+	}
+
+	cmd := exec.Command("ffmpeg", args...)
 	setProcessGroup(cmd)
+	if hls.Enabled {
+		// -hls_fmp4_init_filename is passed as a bare "init.mp4" (an absolute path there breaks
+		// ffmpeg's HLS muxer outright on some builds -- "Failed to open segment ... Invalid
+		// argument"). A bare filename is resolved against the ffmpeg process's own working
+		// directory, which otherwise defaults to this Go process's cwd (wherever the server
+		// binary happens to be launched from) -- not hlsDir. Pinning Dir here is what actually
+		// guarantees init.mp4 lands next to the fragments, regardless of that default.
+		cmd.Dir = hlsDir
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -91,6 +154,7 @@ func StartRecorder(sdpPath, outDir string, segmentSeconds, reorderQueueSize, max
 		stdin:           stdin,
 		outDir:          outDir,
 		segmentListPath: segmentListPath,
+		hlsDir:          hlsDir,
 		logger:          logger,
 		done:            make(chan struct{}),
 	}
@@ -131,6 +195,12 @@ func (r *Recorder) OutputDir() string {
 
 func (r *Recorder) SegmentListPath() string {
 	return r.segmentListPath
+}
+
+// HLSDir returns the local HLS output directory for this attempt, or "" if
+// HLSOptions.Enabled was false when this attempt was started.
+func (r *Recorder) HLSDir() string {
+	return r.hlsDir
 }
 
 

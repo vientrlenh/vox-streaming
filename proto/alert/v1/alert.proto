@@ -9,16 +9,16 @@ service AlertService {
 }
 
 message PushAlertRequest {
-	string scheduleId = 1;
-	string participantId = 2;
-	string streamId = 3;
-	string alertType = 4;
+	string schedule_id = 1;
+	string participant_id = 2;
+	string stream_id = 3;
+	string alert_type = 4;
 	float confidence = 5;
-	int64 capturedAtMs = 6;
-	string eventId = 7;
-	string streamType = 8;
+	int64 captured_at_ms = 6;
+	string event_id = 7;
+	string stream_type = 8;
 	string detail = 9;
-	int64 sequenceNo = 10;
+	int64 sequence_no = 10;
 }
 
 message PushAlertResponse {

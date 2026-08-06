@@ -57,24 +57,49 @@ func NewClient(cfg Config, logger *zap.Logger) (*Client, error) {
 	}, nil
 }
 
+// Live HLS fragments are working files for the invigilator's in-exam view, not evidence: the
+// archival copy of the same stream is kept separately under ffmpeg-segments/ and recording.mp4.
+// Nothing reads a fragment once the exam is over, so keeping them for the recording bucket's full
+// retention stores the entire WebRTC ingest twice for a year.
+//
+// They cannot be targeted by prefix -- scheduleID/sessionID/streamID sit in the middle of the key
+// and S3 lifecycle prefixes have no wildcard -- so they are tagged at upload instead and matched by
+// tag here.
+const (
+	liveAssetTagKey        = "class"
+	liveAssetTagValue      = "live"
+	liveAssetRetentionDays = 3
+	recordingRetentionDays = 365
+	frameRetentionDays     = 7
+
+	// PutObject takes the tag set URL-encoded in a single header, not as structured fields.
+	liveAssetTagging = liveAssetTagKey + "=" + liveAssetTagValue
+)
+
 func (c *Client) EnsureBuckets(ctx context.Context) error {
 	specs := []struct {
 		bucket        string
 		retentionDays int32
+		// true only for buckets a browser fetches with XHR, where CORS applies: hls.js loads live
+		// rewind fragments out of the recording bucket. Frames are consumed as <img> src, which is
+		// not a CORS request at all.
+		browserFetched bool
+		// true only for the bucket that actually holds tagged live assets.
+		expireLiveAssets bool
 	}{
-		{c.cfg.FrameBucket, 7},
-		{c.cfg.RecordingBucket, 365},
+		{c.cfg.FrameBucket, frameRetentionDays, false, false},
+		{c.cfg.RecordingBucket, recordingRetentionDays, true, true},
 	}
 
 	for _, spec := range specs {
-		if err := c.ensureBucket(ctx, spec.bucket, spec.retentionDays); err != nil {
+		if err := c.ensureBucket(ctx, spec.bucket, spec.retentionDays, spec.browserFetched, spec.expireLiveAssets); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays int32) error {
+func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays int32, browserFetched, expireLiveAssets bool) error {
 	_, err := c.s3.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(bucket),
 	})
@@ -108,19 +133,45 @@ func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays 
 		c.logger.Info("bucket created", zap.String("bucket", bucket))
 	}
 
+	rules := []types.LifecycleRule{{
+		ID:     aws.String("auto-expire"),
+		Status: types.ExpirationStatusEnabled,
+		Filter: &types.LifecycleRuleFilter{
+			Prefix: aws.String(""),
+		},
+		Expiration: &types.LifecycleExpiration{
+			Days: aws.Int32(retentionDays),
+		},
+	}}
+
+	if expireLiveAssets {
+		// This overlaps the blanket rule above, which S3 lifecycle cannot express an exception to
+		// (filters have no negation). Where two expiration rules match the same object, S3 applies
+		// the earlier one -- so tagged fragments expire on the short schedule.
+		//
+		// Worth noting for anyone porting this to another S3 implementation: if the backing store
+		// resolved the overlap the other way instead, tagged fragments would simply keep the
+		// bucket's full retention, which is exactly what they had before this rule existed. The
+		// failure mode is "no saving", never "evidence deleted early".
+		rules = append(rules, types.LifecycleRule{
+			ID:     aws.String("expire-live-assets"),
+			Status: types.ExpirationStatusEnabled,
+			Filter: &types.LifecycleRuleFilter{
+				Tag: &types.Tag{
+					Key:   aws.String(liveAssetTagKey),
+					Value: aws.String(liveAssetTagValue),
+				},
+			},
+			Expiration: &types.LifecycleExpiration{
+				Days: aws.Int32(liveAssetRetentionDays),
+			},
+		})
+	}
+
 	_, err = c.s3.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
 		Bucket: aws.String(bucket),
 		LifecycleConfiguration: &types.BucketLifecycleConfiguration{
-			Rules: []types.LifecycleRule{{
-				ID:     aws.String("auto-expire"),
-				Status: types.ExpirationStatusEnabled,
-				Filter: &types.LifecycleRuleFilter{
-					Prefix: aws.String(""),
-				},
-				Expiration: &types.LifecycleExpiration{
-					Days: aws.Int32(retentionDays),
-				},
-			}},
+			Rules: rules,
 		},
 	})
 	if err != nil {
@@ -128,6 +179,33 @@ func (c *Client) ensureBucket(ctx context.Context, bucket string, retentionDays 
 			zap.String("bucket", bucket),
 			zap.Error(err),
 		)
+	}
+
+	if browserFetched {
+		_, err = c.s3.PutBucketCors(ctx, &s3.PutBucketCorsInput{
+			Bucket: aws.String(bucket),
+			CORSConfiguration: &types.CORSConfiguration{
+				CORSRules: []types.CORSRule{{
+					AllowedMethods: []string{"GET", "HEAD"},
+					// Must be "*", not the service's own ALLOWED_ORIGINS. Browsers reach these
+					// objects by following the 302 that GetLiveAsset returns, and per the Fetch
+					// spec a CORS request redirected to a different origin has its Origin header
+					// replaced with the opaque value "null" -- so no explicit origin list can ever
+					// match on the post-redirect request, and hls.js fails every fragment with
+					// "TypeError: Failed to fetch". Origin is not the access control here anyway:
+					// these are presigned URLs, gated by the signature and its expiry.
+					AllowedOrigins: []string{"*"},
+					AllowedHeaders: []string{"Range"},
+					MaxAgeSeconds:  aws.Int32(3600),
+				}},
+			},
+		})
+		if err != nil {
+			c.logger.Warn("set bucket cors failed",
+				zap.String("bucket", bucket),
+				zap.Error(err),
+			)
+		}
 	}
 	return nil
 }
@@ -227,8 +305,76 @@ func (c *Client) UploadFFmpegSegment(ctx context.Context, scheduleID, sessionID,
 	return key, nil
 }
 
+func hlsInitKey(scheduleID, sessionID, streamID string, epoch int) string {
+	return fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/hls/init-%02d.mp4", scheduleID, sessionID, streamID, epoch)
+}
+
+func hlsFragmentKey(scheduleID, sessionID, streamID string, seq int64) string {
+	return fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/hls/%06d.m4s", scheduleID, sessionID, streamID, seq)
+}
+
+func (c *Client) UploadHLSInit(ctx context.Context, scheduleID, sessionID, streamID string, epoch int, r io.Reader) (string, error) {
+	key := hlsInitKey(scheduleID, sessionID, streamID, epoch)
+	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(c.cfg.RecordingBucket),
+		Key:         aws.String(key),
+		Body:        r,
+		ContentType: aws.String("video/mp4"),
+		Tagging:     aws.String(liveAssetTagging),
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload hls init segment: %w", err)
+	}
+	return key, nil
+}
+
+func (c *Client) UploadHLSFragment(ctx context.Context, scheduleID, sessionID, streamID string, seq int64, r io.Reader) (string, error) {
+	key := hlsFragmentKey(scheduleID, sessionID, streamID, seq)
+	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(c.cfg.RecordingBucket),
+		Key:         aws.String(key),
+		Body:        r,
+		ContentType: aws.String("video/iso.segment"),
+		Tagging:     aws.String(liveAssetTagging),
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload hls fragment: %w", err)
+	}
+	return key, nil
+}
+
 func FinalRecordingKey(scheduleID, sessionID, streamID string) string {
 	return fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/recording.mp4", scheduleID, sessionID, streamID)
+}
+
+// QualityReportKey is where a recording's measured quality signals live: beside the recording they
+// describe, under the same retention, in the same bucket.
+//
+// Deliberately not Redis and not a log line. The signals exist to answer a question asked long
+// after the exam -- why a recording is short, why it has no sound, whether the file is the one the
+// client believed it captured -- and Redis keys expire while logs roll over. An object next to the
+// evidence outlives both and travels with it.
+func QualityReportKey(scheduleID, sessionID, streamID string) string {
+	return fmt.Sprintf("schedules/%s/sessions/%s/streams/%s/quality.json", scheduleID, sessionID, streamID)
+}
+
+// UploadQualityReport stores the quality report for an already-uploaded recording.
+//
+// Untagged, so it keeps the recording bucket's full retention rather than the short live-asset
+// window: a report that expired before the recording it describes would leave the recording
+// unexplained for most of its life.
+func (c *Client) UploadQualityReport(ctx context.Context, scheduleID, sessionID, streamID string, report []byte) (string, error) {
+	key := QualityReportKey(scheduleID, sessionID, streamID)
+	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(c.cfg.RecordingBucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(report),
+		ContentType: aws.String("application/json"),
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload quality report: %w", err)
+	}
+	return key, nil
 }
 
 // check finalized mp4 file was assemblized and uploaded yet

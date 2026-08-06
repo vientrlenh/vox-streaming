@@ -126,6 +126,26 @@ func (u *MonitorUseCase) GetActiveSchedules(ctx context.Context, allowedSchedule
 	return result, nil
 }
 
+// FindLiveStream reports whether streamID is currently live under
+// scheduleID, returning its session info if so. Reuses the same
+// SessionScanner (Redis, instance-agnostic) as GetScheduleSnapshot — this is
+// deliberately NOT backed by the in-process SessionManager in the webrtc
+// package, which only reflects peers held by the instance handling this
+// particular request and would false-negative on a multi-instance deployment.
+// Returns (nil, nil) if the stream isn't live (ended, or never existed).
+func (u *MonitorUseCase) FindLiveStream(ctx context.Context, scheduleID, streamID string) (*cache.SessionInfo, error) {
+	sessions, err := u.scanner.ScanSchedule(ctx, scheduleID)
+	if err != nil {
+		return nil, fmt.Errorf("find live stream: %w", err)
+	}
+	for _, s := range sessions {
+		if s.StreamID == streamID {
+			return &s, nil
+		}
+	}
+	return nil, nil
+}
+
 func (u *MonitorUseCase) NotifyJoined(ctx context.Context, scheduleID, participantID, streamID, streamType string) {
 	u.participantEventer.PublishParticipantEvent(ctx, scheduleID, domain.ParticipantEvent{
 		Type: domain.ParticipantJoined, 
@@ -176,7 +196,7 @@ func (u *MonitorUseCase) PublishAlert(ctx context.Context, alert domain.AlertEve
 	var durErr error
 	if u.alertPublisher != nil {
 		durErr = u.alertPublisher.PublishAlertRaised(ctx, domain.AlertRaisedEvent{
-			EventID: uuid.NewString(), 
+			EventID: eventID, 
 			RaisedAt: time.Now().UTC(),
 			AlertEvent: alert,
 		}, )

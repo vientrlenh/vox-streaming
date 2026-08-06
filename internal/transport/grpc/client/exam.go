@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	examv1 "github.com/vientrlenh/vox-streaming/pkg/pb/exam/v1"
 	"github.com/vientrlenh/vox-streaming/pkg/auth"
+	examv1 "github.com/vientrlenh/vox-streaming/pkg/pb/exam/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
@@ -65,7 +65,7 @@ func (c *ExamClient) Addr() string { return c.addr }
 
 // Ping reports an error if the underlying gRPC connection has entered a failed state.
 // gRPC connections are lazy, so Idle/Connecting/Ready all indicate healthy.
-func (c *ExamClient) Ping(_ context.Context) error {
+func (c *ExamClient) Ping(ctx context.Context) error {
 	switch state := c.conn.GetState(); state {
 	case connectivity.TransientFailure, connectivity.Shutdown:
 		return fmt.Errorf("connection state: %s", state)

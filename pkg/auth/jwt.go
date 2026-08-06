@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -37,6 +38,7 @@ type StreamClaims struct {
 	ExamID      string   `json:"examId"`
 	StreamTypes []string `json:"streamTypes"`
 	TokenUse    string   `json:"tokenUse"`
+	ScheduleEndAt int64  `json:"scheduleEndAt"` // Unix seconds, optional on purpose: token minted before this claim existed 
 	jwt.RegisteredClaims
 }
 
@@ -57,6 +59,13 @@ func (c *StreamClaims) CanStream(streamType string) bool {
 
 func (c *StreamClaims) CanAccess(scheduleID, streamType string) bool {
 	return c.ScheduleID == scheduleID && c.CanStream(streamType)
+}
+
+func (c *StreamClaims) ScheduleEnd() (time.Time, bool) {
+	if c.ScheduleEndAt <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(c.ScheduleEndAt, 0).UTC(), true
 }
 
 func (c *MonitorClaims) HasMonitorRole() bool {

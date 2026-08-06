@@ -19,7 +19,7 @@ func TestRecordingSummary(t *testing.T) {
 			seg(0, base, 5*time.Second),
 			seg(1, base.Add(5*time.Second), 5*time.Second),
 		}
-		durationSecs, hasGaps := recordingSummary(metas)
+		durationSecs, hasGaps, _ := recordingSummary(nil, metas)
 		if hasGaps {
 			t.Error("expected hasGaps=false for contiguous segments")
 		}
@@ -33,7 +33,7 @@ func TestRecordingSummary(t *testing.T) {
 			seg(0, base, 5*time.Second),
 			seg(1, base.Add(20*time.Second), 5*time.Second),
 		}
-		durationSecs, hasGaps := recordingSummary(metas)
+		durationSecs, hasGaps, _ := recordingSummary(nil, metas)
 		if !hasGaps {
 			t.Error("expected hasGaps=true when a >2s gap exists")
 		}
@@ -75,6 +75,41 @@ func TestRecordingRequestFromStreamEnded(t *testing.T) {
 	}
 	if !got.RequestedAt.Equal(endedAt) {
 		t.Errorf("got RequestedAt=%v, want it to match event.EndedAt=%v", got.RequestedAt, endedAt)
+	}
+}
+
+// The two ingest paths hand concat different audio: the desktop client's Media Foundation sink
+// writer emits AAC, the WebRTC recorder passes Opus straight through. Getting this wrong is not
+// cosmetic in either direction -- transcoding AAC puts a needless lossy generation on the recording
+// a grade is based on, and copying Opus leaves an MP4 that Safari and QuickTime will not open.
+func TestNeedsAudioTranscode(t *testing.T) {
+	cases := []struct {
+		name  string
+		codec string
+		want  bool
+	}{
+		{"desktop upload is already aac", "aac", false},
+		{"webrtc ingest carries opus", "opus", true},
+		{"ffprobe casing is not relied on", "AAC", false},
+		{"some other codec still gets normalised", "vorbis", true},
+		{"unknown codec falls back to copying", "", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := needsAudioTranscode(c.codec); got != c.want {
+				t.Errorf("needsAudioTranscode(%q) = %v, want %v", c.codec, got, c.want)
+			}
+		})
+	}
+}
+
+// An empty codec means the probe failed or there is no audio at all. Copying is what this did
+// before any of this existed, so the fallback cannot make a recording worse than it already was --
+// whereas defaulting to a transcode would re-encode every recording whenever ffprobe was missing.
+func TestUnknownAudioCodecFallsBackToPreviousBehaviour(t *testing.T) {
+	if needsAudioTranscode("") {
+		t.Error("an unknown codec must copy, not transcode")
 	}
 }
 
