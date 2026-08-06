@@ -56,14 +56,21 @@ EXPOSE 8082
 # gRPC alert ingest server (GRPC_ADDR)
 EXPOSE 9096
 # Prometheus metrics + health probes: /metrics /healthz /readyz (METRIC_ADDR)
-EXPOSE 9090
+EXPOSE 9098
 # WebRTC media: set WEBRTC_UDP_PORT to mux all media onto ONE UDP port and publish
 # just that port (example below). Also set WEBRTC_NAT_1TO1_IP to the host's public
 # IP when running behind a 1:1 NAT so host candidates advertise a reachable address.
 EXPOSE 50000/udp
 
 # Liveness probe against the metrics server (/healthz never touches upstreams).
+#
+# Số cổng ở đây PHẢI khớp METRIC_ADDR trong .env và khối `ports:` của docker-compose.
+#
+# Không dùng được ${METRIC_ADDR}: cấu hình vào tiến trình qua godotenv.Load() đọc /app/.env,
+# tức biến chỉ tồn tại BÊN TRONG tiến trình Go, không phải trong môi trường container. Shell
+# của healthcheck không thấy nó, `${METRIC_ADDR:-:9090}` rơi về :9090 và probe gọi vào cổng
+# không ai nghe -- container bị đánh unhealthy dù service hoàn toàn bình thường (đã đo).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD wget -qO- http://127.0.0.1:9090/healthz >/dev/null 2>&1 || exit 1
+    CMD wget -qO- http://127.0.0.1:9098/healthz >/dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/app/vox-streaming"]
