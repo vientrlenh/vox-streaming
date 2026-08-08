@@ -109,7 +109,7 @@ func (p *Publisher) PublishRecordingPartChanged(ctx context.Context, event domai
 }
 
 func (p *Publisher) PublishAlertRaised(ctx context.Context, event domain.AlertRaisedEvent) error {
-	return p.publish(ctx, domain.TopicAlertRaised, event.ScheduleID, event)
+	return p.publish(ctx, domain.TopicAlertRaised, event.SessionID, event)
 }
 
 func (p *Publisher) publish(ctx context.Context, topic, key string, payload any) error {

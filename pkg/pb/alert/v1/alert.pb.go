@@ -23,7 +23,7 @@ const (
 
 type PushAlertRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ScheduleId    string                 `protobuf:"bytes,1,opt,name=schedule_id,json=scheduleId,proto3" json:"schedule_id,omitempty"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	ParticipantId string                 `protobuf:"bytes,2,opt,name=participant_id,json=participantId,proto3" json:"participant_id,omitempty"`
 	StreamId      string                 `protobuf:"bytes,3,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
 	AlertType     string                 `protobuf:"bytes,4,opt,name=alert_type,json=alertType,proto3" json:"alert_type,omitempty"`
@@ -67,9 +67,9 @@ func (*PushAlertRequest) Descriptor() ([]byte, []int) {
 	return file_alert_v1_alert_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *PushAlertRequest) GetScheduleId() string {
+func (x *PushAlertRequest) GetSessionId() string {
 	if x != nil {
-		return x.ScheduleId
+		return x.SessionId
 	}
 	return ""
 }
@@ -185,10 +185,10 @@ var File_alert_v1_alert_proto protoreflect.FileDescriptor
 
 const file_alert_v1_alert_proto_rawDesc = "" +
 	"\n" +
-	"\x14alert/v1/alert.proto\x12\balert.v1\"\xd1\x02\n" +
-	"\x10PushAlertRequest\x12\x1f\n" +
-	"\vschedule_id\x18\x01 \x01(\tR\n" +
-	"scheduleId\x12%\n" +
+	"\x14alert/v1/alert.proto\x12\balert.v1\"\xcf\x02\n" +
+	"\x10PushAlertRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12%\n" +
 	"\x0eparticipant_id\x18\x02 \x01(\tR\rparticipantId\x12\x1b\n" +
 	"\tstream_id\x18\x03 \x01(\tR\bstreamId\x12\x1d\n" +
 	"\n" +

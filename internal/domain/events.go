@@ -86,6 +86,7 @@ type ScheduleClosedEvent struct {
 
 type ParticipantEvent struct {
 	Type          string    `json:"type"`
+	SessionID     string    `json:"sessionId"`
 	ParticipantID string    `json:"participantId"`
 	StreamID      string    `json:"streamId"`
 	StreamType    string    `json:"streamType"`
@@ -123,7 +124,7 @@ func DefaultAlertLevel(alertType string) AlertLevel {
 
 type AlertEvent struct {
 	Source        string     `json:"source"`
-	ScheduleID    string     `json:"scheduleId"`
+	SessionID    string     `json:"sessionId"`
 	ParticipantID string     `json:"participantId"`
 	StreamID      string     `json:"streamId"`
 	StreamType    string     `json:"streamType"`

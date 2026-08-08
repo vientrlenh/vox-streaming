@@ -512,7 +512,7 @@ func handleStreamStarted(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.H
 			zap.String("stream_type", event.StreamType),
 		)
 
-		mu.NotifyJoined(ctx, event.ScheduleID, event.ParticipantID, event.StreamID, event.StreamType)
+		mu.NotifyJoined(ctx, event.ScheduleID, event.SessionID, event.ParticipantID, event.StreamID, event.StreamType)
 
 		return nil
 	}
@@ -532,7 +532,7 @@ func handleStreamEnded(logger *zap.Logger, mu *usecase.MonitorUseCase) queue.Han
 			zap.Int64("durationSecs", event.Duration),
 		)
 
-		mu.NotifyLeft(ctx, event.ScheduleID, event.ParticipantID, event.StreamID, event.StreamType)
+		mu.NotifyLeft(ctx, event.ScheduleID, event.SessionID, event.ParticipantID, event.StreamID, event.StreamType)
 
 		return nil
 	}

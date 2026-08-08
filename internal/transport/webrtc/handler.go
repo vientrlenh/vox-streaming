@@ -252,7 +252,26 @@ func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 
 	frameCh := h.broadcaster.Subscribe(ctx, scheduleID)
 	eventCh := h.monitorUseCase.SubscribeEvents(ctx, scheduleID)
-	alertCh := h.monitorUseCase.SubscribeAlerts(ctx, scheduleID)
+
+	// Alert được publish theo sessionID (xem MonitorUseCase.PublishAlert), nhưng một màn hình
+	// giám sát theo dõi cả scheduleID - có thể nhiều thí sinh cùng lúc. alertCh gộp alert của
+	// tất cả session đang biết vào một channel duy nhất; addAlertSource cho phép thêm session mới
+	// (thí sinh vào phòng sau khi giám thị đã kết nối) mà không cần dựng lại fan-in.
+	alertCh, addAlertSource := newAlertFanIn(ctx)
+	seenSessions := make(map[string]struct{})
+	subscribeSession := func(sessionID string) {
+		if sessionID == "" {
+			return
+		}
+		if _, exists := seenSessions[sessionID]; exists {
+			return
+		}
+		seenSessions[sessionID] = struct{}{}
+		addAlertSource(h.monitorUseCase.SubscribeAlerts(ctx, sessionID))
+	}
+	for _, stream := range snapshot {
+		subscribeSession(stream.SessionID)
+	}
 
 	// Read goroutine dùng để detect disconnect
 	go func() {
@@ -306,6 +325,9 @@ func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 		case event, ok := <-eventCh:
 			if !ok {
 				return
+			}
+			if event.Type == domain.ParticipantJoined {
+				subscribeSession(event.SessionID)
 			}
 			if err := conn.WriteJSON(MonitorMessage{Type: "participant", Event: &event}); err != nil {
 				return
@@ -599,4 +621,36 @@ func (s *safeConn) WriteJSON(v any) error {
 	defer s.mu.Unlock()
 	s.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
 	return s.conn.WriteJSON(v)
+}
+
+// newAlertFanIn gộp nhiều nguồn domain.AlertEvent vào một channel duy nhất. Trả về channel gộp
+// và một hàm add để nạp thêm nguồn về sau (dùng khi có thí sinh mới vào phòng sau khi monitor đã
+// kết nối) - vì số lượng nguồn không cố định ngay từ đầu, out không bao giờ được close tường minh;
+// mọi goroutine (kể cả những goroutine được add() sau) tự thoát qua ctx.Done(), và select phía
+// ServeMonitor đã có nhánh ctx.Done() riêng nên không cần out đóng lại mới dừng được.
+func newAlertFanIn(ctx context.Context) (<-chan domain.AlertEvent, func(<-chan domain.AlertEvent)) {
+	out := make(chan domain.AlertEvent, 32)
+
+	add := func(input <-chan domain.AlertEvent) {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case alert, ok := <-input:
+					if !ok {
+						return
+					}
+
+					select {
+					case out <- alert:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	return out, add
 }

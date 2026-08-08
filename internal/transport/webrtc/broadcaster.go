@@ -133,19 +133,19 @@ func (b *RedisBroadcaster) SubscribeEvents(ctx context.Context, scheduleID strin
 	return out
 }
 
-func scheduleAlertsChannel(scheduleID string) string {
-	return "schedule:" + scheduleID + ":alerts"
+func sessionAlertsChannel(sessionID string) string {
+	return "session:" + sessionID + ":alerts"
 }
 
-func (b *RedisBroadcaster) PublishAlertEvent(ctx context.Context, scheduleID string, alert domain.AlertEvent) error {
+func (b *RedisBroadcaster) PublishAlertEvent(ctx context.Context, sessionID string, alert domain.AlertEvent) error {
 	data, err := json.Marshal(alert)
 	if err != nil {
 		b.logger.Error("alert marshal failed", zap.Error(err))
 		return fmt.Errorf("marshal alert: %w", err)
 	}
-	if err := b.client.Publish(ctx, scheduleAlertsChannel(scheduleID), data).Err(); err != nil {
-		b.logger.Warn("alert publish failed", 
-			zap.String("scheduleId", scheduleID), 
+	if err := b.client.Publish(ctx, sessionAlertsChannel(sessionID), data).Err(); err != nil {
+		b.logger.Warn("alert publish failed",
+			zap.String("sessionId", sessionID),
 			zap.Error(err),
 		)
 		return fmt.Errorf("redis publish: %w", err)
@@ -153,11 +153,11 @@ func (b *RedisBroadcaster) PublishAlertEvent(ctx context.Context, scheduleID str
 	return nil
 }
 
-func (b *RedisBroadcaster) SubscribeAlerts(ctx context.Context, scheduleID string) <-chan domain.AlertEvent {
+func (b *RedisBroadcaster) SubscribeAlerts(ctx context.Context, sessionID string) <-chan domain.AlertEvent {
 	out := make(chan domain.AlertEvent, 16)
 	go func() {
 		defer close(out)
-		pubsub := b.client.Subscribe(ctx, scheduleAlertsChannel(scheduleID))
+		pubsub := b.client.Subscribe(ctx, sessionAlertsChannel(sessionID))
 		defer pubsub.Close()
 		for {
 			msg, err := pubsub.ReceiveMessage(ctx)

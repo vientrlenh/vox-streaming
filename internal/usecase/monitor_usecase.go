@@ -36,8 +36,8 @@ type ParticipantEventer interface {
 }
 
 type AlertEventer interface {
-	PublishAlertEvent(ctx context.Context, scheduleID string, alert domain.AlertEvent) error
-	SubscribeAlerts(ctx context.Context, scheduleID string) <-chan domain.AlertEvent
+	PublishAlertEvent(ctx context.Context, sessionID string, alert domain.AlertEvent) error
+	SubscribeAlerts(ctx context.Context, sessionID string) <-chan domain.AlertEvent
 }
 
 type AlertRaisedPublisher interface {
@@ -146,21 +146,23 @@ func (u *MonitorUseCase) FindLiveStream(ctx context.Context, scheduleID, streamI
 	return nil, nil
 }
 
-func (u *MonitorUseCase) NotifyJoined(ctx context.Context, scheduleID, participantID, streamID, streamType string) {
+func (u *MonitorUseCase) NotifyJoined(ctx context.Context, scheduleID, sessionID, participantID, streamID, streamType string) {
 	u.participantEventer.PublishParticipantEvent(ctx, scheduleID, domain.ParticipantEvent{
-		Type: domain.ParticipantJoined, 
-		ParticipantID: participantID, 
-		StreamID: streamID, 
-		StreamType: streamType, 
+		Type: domain.ParticipantJoined,
+		SessionID: sessionID,
+		ParticipantID: participantID,
+		StreamID: streamID,
+		StreamType: streamType,
 		At: time.Now().UTC(),
 	})
 }
 
-func (u *MonitorUseCase) NotifyLeft(ctx context.Context, scheduleID, participantID, streamID, streamType string) {
+func (u *MonitorUseCase) NotifyLeft(ctx context.Context, scheduleID, sessionID, participantID, streamID, streamType string) {
 	u.participantEventer.PublishParticipantEvent(ctx, scheduleID, domain.ParticipantEvent{
-		Type: domain.ParticipantLeft, 
-		ParticipantID: participantID, 
-		StreamID: streamID, 
+		Type: domain.ParticipantLeft,
+		SessionID: sessionID,
+		ParticipantID: participantID,
+		StreamID: streamID,
 		StreamType: streamType,
 		At: time.Now().UTC(),
 	})
@@ -183,10 +185,10 @@ func (u *MonitorUseCase) PublishAlert(ctx context.Context, alert domain.AlertEve
 	}
 
 	// redis pub/sub live, do not block because of kafka
-	liveErr := u.alertEventer.PublishAlertEvent(ctx, alert.ScheduleID, alert)
+	liveErr := u.alertEventer.PublishAlertEvent(ctx, alert.SessionID, alert)
 	if liveErr != nil {
 		u.logger.Warn("live alert publish failed", 
-			zap.String("scheduleId", alert.ScheduleID), 
+			zap.String("sessionId", alert.SessionID), 
 			zap.String("alertType", alert.AlertType), 
 			zap.Error(liveErr),
 		)
@@ -202,7 +204,7 @@ func (u *MonitorUseCase) PublishAlert(ctx context.Context, alert domain.AlertEve
 		}, )
 		if durErr != nil {
 			u.logger.Error("durable alert publish failed", 
-				zap.String("scheduleId", alert.ScheduleID), 
+				zap.String("sessionId", alert.SessionID), 
 				zap.String("alertType", alert.AlertType), 
 				zap.Error(durErr),
 			)
@@ -216,6 +218,6 @@ func (u *MonitorUseCase) PublishAlert(ctx context.Context, alert domain.AlertEve
 }
 
 
-func (u *MonitorUseCase) SubscribeAlerts(ctx context.Context, scheduleID string) <-chan domain.AlertEvent {
-	return u.alertEventer.SubscribeAlerts(ctx, scheduleID)
+func (u *MonitorUseCase) SubscribeAlerts(ctx context.Context, sessionID string) <-chan domain.AlertEvent {
+	return u.alertEventer.SubscribeAlerts(ctx, sessionID)
 }

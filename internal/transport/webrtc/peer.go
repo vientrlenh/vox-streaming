@@ -112,7 +112,7 @@ func (st *ffmpegIngestState) forwardAudio(raw []byte) {
 
 type Peer struct {
 	pc            *webrtc.PeerConnection
-	scheduleID        string
+	scheduleID    string
 	sessionID 	  string
 	participantID string
 	streamID      string
@@ -1018,7 +1018,7 @@ func (p *Peer) close() {
 			if err := p.monitorUseCase.PublishAlert(
 				ctx, domain.AlertEvent{
 					Source: domain.AlertSourceStreaming,
-					ScheduleID: p.scheduleID,
+					SessionID: p.sessionID,
 					ParticipantID: p.participantID,
 					StreamID: p.streamID,
 					StreamType: p.streamType,
@@ -1034,7 +1034,7 @@ func (p *Peer) close() {
 			if err := p.monitorUseCase.PublishAlert(
 				ctx, domain.AlertEvent{
 					Source: domain.AlertSourceStreaming, 
-					ScheduleID: p.scheduleID, 
+					SessionID: p.sessionID, 
 					ParticipantID: p.participantID, 
 					StreamID: p.streamID, 
 					StreamType: p.streamType, 
