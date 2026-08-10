@@ -1,24 +1,28 @@
-# docker-compose for the vox-streaming service ONLY.
-# Third-party dependencies (Redis, Kafka, MinIO/S3, coturn, the exam gRPC service)
-# are expected to run elsewhere and are reached via the addresses in .env.
+# docker-compose cho RIÊNG service vox-streaming.
+# Phụ thuộc ngoài (Redis, Kafka, MinIO/S3, coturn, exam gRPC service) chạy ở nơi khác và
+# được với tới qua địa chỉ trong .env.
 #
-#   docker compose up -d --build      # build image + start
-#   docker compose logs -f            # follow logs
-#   docker compose down               # stop
+#   docker compose up -d --build      # build image + chạy
+#   docker compose logs -f            # xem log
+#   docker compose down               # dừng
 #
 # ---------------------------------------------------------------------------
-# WEBRTC / NETWORKING NOTE (đọc kỹ):
-# The service is a WebRTC endpoint. Set WEBRTC_UDP_PORT in .env so Pion muxes ALL
-# peer media onto that ONE UDP port — then you only need to publish/forward it.
+# MẠNG -- đọc kỹ, đây là chỗ đã từng làm service chạy mà không ai gọi được
 #
-#   * bridge networking (recommended, cross-platform):  publish the TCP ports +
-#     the single WEBRTC_UDP_PORT/udp, and set WEBRTC_NAT_1TO1_IP to the host's
-#     reachable IP so host candidates advertise an address the browser can hit.
-#     See the "bridge" block at the bottom.
+# Dùng BRIDGE + publish cổng, KHÔNG dùng network_mode: host.
 #
-#   * network_mode: host  ->  also fine on Linux; the container shares the host
-#     stack so media + the localhost:* addresses in .env resolve directly. With
-#     the UDP mux you no longer NEED host mode, but it still works.
+# `network_mode: host` chỉ thật sự là mạng của máy chủ trên Linux. Trên Docker Desktop
+# (Windows/macOS) container nằm trong máy ảo Linux của Docker, nên "host" là host của MÁY ẢO
+# đó chứ không phải máy bạn. Đo ngày 2026-08-06: container nhận IP 192.168.65.3, và
+#   host -> :8082/:9090/:9096   FAIL cả ba (không publish cổng nào)
+#   container -> redis/kafka/agents trên máy   FAIL cả ba
+# Service vẫn báo "healthy" vì HEALTHCHECK tự gọi chính nó BÊN TRONG container -- hỏng mạng
+# không làm healthcheck đỏ, nên lỗi này im lặng.
+#
+# Service là một điểm cuối WebRTC: đặt WEBRTC_UDP_PORT trong .env để Pion dồn media của MỌI
+# peer vào ĐÚNG MỘT cổng UDP, nhờ đó chỉ cần publish một cổng thay vì cả dải ephemeral.
+# Và đặt WEBRTC_NAT_1TO1_IP thành IP mà trình duyệt với tới được, nếu không host candidate
+# quảng bá IP nội bộ của container và client không kết nối được.
 # ---------------------------------------------------------------------------
 
 services:
@@ -29,72 +33,76 @@ services:
     image: vox-streaming:latest
     container_name: vox-streaming
 
-    # Host networking: required for WebRTC UDP media. Linux only.
-    network_mode: host
+    # Cổng phải khớp .env (WEBRTC_ADDR / GRPC_ADDR / METRIC_ADDR / WEBRTC_UDP_PORT) và khớp
+    # Dockerfile EXPOSE. Bốn cổng này đã kiểm là còn trống trên máy: 8080 là vox-app,
+    # 8081 kafka-ui, 8000 agents, 9092/9094 kafka, 5432/5433 postgres, 6379 redis.
+    ports:
+      - '8082:8082'          # HTTP / WebSocket signaling   (WEBRTC_ADDR)
+      - '9096:9096'          # gRPC AlertService            (GRPC_ADDR) -- vox gọi vào đây
+      - '9098:9098'          # metrics + /healthz           (METRIC_ADDR)
+      - '50000:50000/udp'    # WebRTC media mux             (WEBRTC_UDP_PORT)
 
-    # godotenv.Load() in cmd/server/main.go reads ./.env from the working dir and
-    # FATALS if the file is missing. Bind-mount it (read-only) so the container
-    # gets the same config without baking secrets into the image.
+    # CHUNG MẠNG với vox: Redis/Kafka gọi thẳng bằng TÊN SERVICE (redis:6379, kafka:9092),
+    # không qua host.docker.internal nữa. Đổi lại được ba thứ:
+    #   - hết bẫy advertised-listener: listener INTERNAL của Kafka quảng bá "kafka:9092",
+    #     địa chỉ đó đúng từ trong mạng nên EnsureTopics tìm được controller
+    #   - vox-app gọi ngược lại bằng "vox-streaming:9096", không cần host-gateway
+    #   - traffic không phải vòng ra ngoài host rồi quay lại
+    #
+    # extra_hosts VẪN GIỮ: agents chạy thẳng trên máy (không trong docker) nên
+    # AI_WEBRTC_URL vẫn phải đi qua host.docker.internal.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+
+    networks:
+      - vox-network
+
+    # godotenv.Load() trong cmd/server/main.go đọc ./.env từ thư mục làm việc và FATAL nếu
+    # thiếu file. Bind-mount chỉ-đọc để container dùng chung cấu hình mà không nướng bí mật
+    # vào image.
     volumes:
       - ./.env:/app/.env:ro
-      # Isolate segment/recording temp writes from the container layer (SEGMENT_TEMP_DIR=/app/tmp).
+      # Tách phần ghi tạm của segment/recording khỏi lớp container (SEGMENT_TEMP_DIR=/app/tmp).
       - vox-tmp:/app/tmp
 
-    # Reap zombie ffmpeg subprocesses (spawned by the recorder/assembler).
+    # Dọn tiến trình ffmpeg zombie (do recorder/assembler sinh ra).
     init: true
 
     restart: unless-stopped
 
-    # Bound resources so a runaway assembly/ffmpeg job can't starve the host.
-    # Tune to your workload; remove if you don't want limits.
+    # Chặn trần tài nguyên để một job assembly/ffmpeg chạy loạn không ăn hết máy.
     deploy:
       resources:
         limits:
-          cpus: "2.0"
+          cpus: '2.0'
           memory: 1g
 
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: '10m'
+        max-file: '3'
 
-    # Liveness healthcheck is defined in the Dockerfile (hits /healthz on METRIC_ADDR).
+    # Healthcheck liveness khai trong Dockerfile (gọi /healthz trên METRIC_ADDR).
 
 volumes:
   vox-tmp:
 
+# Mạng do vox/docker-compose.yml tạo (nó khai `name: vox-network` tường minh nên tên không bị
+# thêm tiền tố project). `external: true` nghĩa là compose này KHÔNG tạo mạng, chỉ tham gia --
+# nên phải `docker compose up` bên vox TRƯỚC, nếu không lệnh ở đây báo network not found.
+networks:
+  vox-network:
+    external: true
+    name: vox-network
+
 # ===========================================================================
-# BRIDGE ALTERNATIVE (cross-platform, with the single-UDP-port mux)
-# ---------------------------------------------------------------------------
-# Replace the block above with the one below to run on a bridge network. In .env:
-#   WEBRTC_UDP_PORT=50000                # mux all media onto this one UDP port
-#   WEBRTC_NAT_1TO1_IP=<host public IP>  # advertise a browser-reachable host IP
-# and point the localhost:* deps at reachable hosts, e.g.
-#   REDIS_ADDR=host.docker.internal:6379, KAFKA_BROKERS=host.docker.internal:9094.
-# (A TURN server is only needed if the browser still can't reach WEBRTC_NAT_1TO1_IP.)
+# CHỈ TRÊN LINUX: nếu chạy Docker Engine thật (không phải Docker Desktop) thì có thể đổi
+# khối ports/extra_hosts ở trên thành:
 #
-#   vox-streaming:
-#     build:
-#       context: .
-#       dockerfile: Dockerfile
-#     image: vox-streaming:latest
-#     container_name: vox-streaming
-#     ports:
-#       - "8082:8082"          # HTTP / WebSocket signaling  (WEBRTC_ADDR)
-#       - "9096:9096"          # gRPC alert ingest           (GRPC_ADDR)
-#       - "9090:9090"          # metrics + health            (METRIC_ADDR)
-#       - "50000:50000/udp"    # WebRTC media mux            (WEBRTC_UDP_PORT)
-#     extra_hosts:
-#       - "host.docker.internal:host-gateway"   # let the container reach host services
-#     volumes:
-#       - ./.env:/app/.env:ro
-#       - vox-tmp:/app/tmp
-#     init: true
-#     restart: unless-stopped
-#     logging:
-#       driver: json-file
-#       options:
-#         max-size: "10m"
-#         max-file: "3"
+#     network_mode: host
+#
+# và trong .env đổi các địa chỉ host.docker.internal:* về localhost:*. Lúc đó không cần
+# publish cổng nữa vì container dùng chung stack mạng với máy. Với UDP mux thì host mode
+# KHÔNG còn bắt buộc -- bridge ở trên chạy được ở mọi nền, nên chỉ đổi khi có lý do rõ ràng.
 # ===========================================================================

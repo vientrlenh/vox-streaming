@@ -40,9 +40,15 @@ func main() {
 	logger, _ := zap.NewProduction()
 	defer logger.Sync()
 
-	err := godotenv.Load()
-	if err != nil {
-		logger.Fatal("error loading env file")
+	// godotenv.Load() only matters for local `go run` (reads ./.env, merges
+	// its keys into the process env). In containers (docker-compose bind-mount,
+	// or k8s ConfigMap/Secret via envFrom) real env vars are already set
+	// directly on the process -- there is no .env file to find, and os.Getenv
+	// below works fine either way. Only Fatal on a genuine parse error (a .env
+	// file that exists but is malformed); a missing file is the expected,
+	// normal case in every container deployment.
+	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
+		logger.Fatal("error loading env file", zap.Error(err))
 	}
 
 	brokers := os.Getenv("KAFKA_BROKERS")
@@ -665,6 +671,10 @@ func ensureStorage(startupCtx context.Context, logger *zap.Logger) *storage.Clie
 	}
 	if b := os.Getenv("STORAGE_RECORDING_BUCKET"); b != "" {
 		storageCfg.RecordingBucket = b
+	}
+	
+	if r := os.Getenv("STORAGE_REGION"); r != "" {
+		storageCfg.Region = r
 	}
 	storageCfg.UseSSL = os.Getenv("STORAGE_USE_SSL") == "true"
 	if presignMins := os.Getenv("STORAGE_PRESIGN_MINUTES"); presignMins != "" {
