@@ -542,12 +542,11 @@ func buildICEServers() []pwebrtc.ICEServer {
 	var servers []pwebrtc.ICEServer
 
 	stunURLs := os.Getenv("STUN_URLS")
-	if stunURLs == "" {
-		stunURLs = "stun:stun.l.google.com:19302"
+	if stunURLs != "" {
+		servers = append(servers, pwebrtc.ICEServer{
+			URLs: strings.Split(stunURLs, ","),
+		})
 	}
-	servers = append(servers, pwebrtc.ICEServer{
-		URLs: strings.Split(stunURLs, ","),
-	})
 
 	turnURL := os.Getenv("TURN_URL")
 	if turnURL != "" {
