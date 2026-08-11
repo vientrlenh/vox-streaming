@@ -117,7 +117,14 @@ func NewHandler(
 				if origin == "" {
 					return true
 				}
-				if slices.Contains(allowedOrigins, origin) {
+				// "*" here means the same thing it means to the rs/cors middleware
+				// this same allowedOrigins slice is also passed to (cmd/server/main.go) --
+				// allow any origin. Without this special case, exact-match membership
+				// against a literal "*" element never matches a real browser Origin
+				// (rejected every real request in prod, confirmed live 2026-08-11:
+				// "websocket origin rejected" for https://voxenta.net against
+				// allowed=["*"]).
+				if slices.Contains(allowedOrigins, "*") || slices.Contains(allowedOrigins, origin) {
 					return true
 				}
 				// gorilla's own rejection names neither the origin it saw nor the list
