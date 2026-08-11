@@ -101,9 +101,36 @@ func NewHandler(
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  8192,
 			WriteBufferSize: 8192,
+			// An absent Origin is allowed; a present one must be on the list.
+			//
+			// Origin is a browser mechanism, and the WPF capture client is not a
+			// browser -- it sends no Origin at all, so an exact-match check alone
+			// rejects every native client with a bare "request origin not allowed".
+			//
+			// Allowing the empty case does not weaken the browser protection this
+			// check exists for. CSWSH needs a page to reach an endpoint carrying
+			// ambient credentials; here the credential is the JWT in the query
+			// string, never a cookie, and a page cannot suppress its own Origin
+			// header -- so an empty Origin can never have come from one.
 			CheckOrigin: func(r *http.Request) bool {
 				origin := r.Header.Get("Origin")
-				return slices.Contains(allowedOrigins, origin)
+				if origin == "" {
+					return true
+				}
+				if slices.Contains(allowedOrigins, origin) {
+					return true
+				}
+				// gorilla's own rejection names neither the origin it saw nor the list
+				// it compared against, so the failure reads identically whether the
+				// deployment config is wrong or the client is. Nearly every real case
+				// is a near-miss -- trailing slash, http vs https, a port that is
+				// present on one side only -- and none of those are visible without
+				// printing both sides.
+				logger.Warn("websocket origin rejected",
+					zap.String("origin", origin),
+					zap.Strings("allowed", allowedOrigins),
+				)
+				return false
 			},
 		},
 		logger:    logger,
