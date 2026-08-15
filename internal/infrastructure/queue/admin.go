@@ -74,6 +74,14 @@ var RequiredTopics = []TopicSpec{
 // little as an hour.
 const dlqRetentionMS int64 = 604800000 // 7 days
 
+const (
+	// How long EnsureTopics waits for a freshly created topic to become visible in
+	// broker metadata. Creation is asynchronous, so a read immediately after
+	// CreateTopics can legitimately still miss it.
+	topicVerifyTimeout  = 5 * time.Second
+	topicVerifyInterval = 250 * time.Millisecond
+)
+
 // dlqTopicSpecs derives the dead-letter topic for each required topic.
 //
 // These must be created explicitly: DLQWriter produces to "<topic>.dlq" (see
@@ -134,39 +142,131 @@ func EnsureTopics(ctx context.Context, cfg Config, brokers []string, logger *zap
 	allSpecs = append(allSpecs, RequiredTopics...)
 	allSpecs = append(allSpecs, dlqTopicSpecs()...)
 
-	topicConfigs := make([]kafka.TopicConfig, 0, len(allSpecs))
-	for _, spec := range allSpecs {
-		topicConfigs = append(topicConfigs, kafka.TopicConfig{
-			Topic:             spec.Name,
-			NumPartitions:     spec.NumPartitions,
-			ReplicationFactor: spec.ReplicationFactor,
-			ConfigEntries: []kafka.ConfigEntry{
-				{
-					ConfigName:  "retention.ms",
-					ConfigValue: fmt.Sprint(spec.RetentionMS),
-				},
-				{
-					ConfigName:  "compression.type",
-					ConfigValue: "snappy",
-				},
-			},
-		})
+	existing, err := topicPartitionCounts(controllerCon)
+	if err != nil {
+		return fmt.Errorf("kafka read topics: %w", err)
 	}
 
-	if err := controllerCon.CreateTopics(topicConfigs...); err != nil {
-		if !isTopicExistsError(err) {
-			return fmt.Errorf("kafka create topics: %w", err)
+	// Only genuinely absent topics go into the CreateTopics batch. Including ones
+	// that already exist earns a TOPIC_ALREADY_EXISTS back, and kafka-go collapses
+	// the broker's per-topic response array into the first error it finds -- so a
+	// single pre-existing topic used to mask a real failure on every other topic in
+	// the same request, after which the loop below reported all of them as ensured.
+	var missing []kafka.TopicConfig
+	for _, spec := range allSpecs {
+		partitions, present := existing[spec.Name]
+		if !present {
+			missing = append(missing, topicConfigOf(spec))
+			continue
+		}
+		if partitions < spec.NumPartitions {
+			// Reported rather than repaired: CreateTopics cannot widen a topic that
+			// already exists. Worth saying out loud because the usual cause is a
+			// topic auto-created by whichever producer touched it first, which lands
+			// with the broker's default single partition -- capping consumer
+			// parallelism and quietly making the Hash balancer's per-schedule
+			// ordering guarantee vacuous.
+			logger.Warn("kafka topic has fewer partitions than required",
+				zap.String("topic", spec.Name),
+				zap.Int("actual", partitions),
+				zap.Int("required", spec.NumPartitions),
+			)
 		}
 	}
 
-	for _, spec := range allSpecs {
-		logger.Info("kafka topic ensured",
-			zap.String("topic", spec.Name),
-			zap.Int("partitions", spec.NumPartitions),
-			zap.Int64("retentionMs", spec.RetentionMS),
-		)
+	if len(missing) == 0 {
+		logger.Info("kafka topics verified", zap.Int("topics", len(allSpecs)))
+		return nil
 	}
+
+	names := make([]string, 0, len(missing))
+	for _, topicCfg := range missing {
+		names = append(names, topicCfg.Topic)
+	}
+	logger.Info("creating missing kafka topics", zap.Strings("topics", names))
+
+	// A concurrent instance may have created the same topic between the read above
+	// and this call; that specific race is the only reason to still tolerate the
+	// already-exists error here.
+	if err := controllerCon.CreateTopics(missing...); err != nil && !isTopicExistsError(err) {
+		return fmt.Errorf("kafka create topics %v: %w", names, err)
+	}
+
+	// CreateTopics returning cleanly is not proof the topics are usable: creation is
+	// asynchronous and metadata takes a moment to reach the broker we are talking
+	// to. Confirm against the broker instead of declaring success on the strength of
+	// the request having been accepted.
+	stillMissing, err := waitForTopics(ctx, controllerCon, names)
+	if err != nil {
+		return fmt.Errorf("kafka verify topics: %w", err)
+	}
+	if len(stillMissing) > 0 {
+		return fmt.Errorf("kafka topics still missing after create: %s", strings.Join(stillMissing, ", "))
+	}
+
+	logger.Info("kafka topics created", zap.Strings("topics", names))
 	return nil
+}
+
+func topicConfigOf(spec TopicSpec) kafka.TopicConfig {
+	return kafka.TopicConfig{
+		Topic:             spec.Name,
+		NumPartitions:     spec.NumPartitions,
+		ReplicationFactor: spec.ReplicationFactor,
+		ConfigEntries: []kafka.ConfigEntry{
+			{
+				ConfigName:  "retention.ms",
+				ConfigValue: fmt.Sprint(spec.RetentionMS),
+			},
+			{
+				ConfigName:  "compression.type",
+				ConfigValue: "snappy",
+			},
+		},
+	}
+}
+
+// topicPartitionCounts maps every topic the broker knows about to its partition
+// count. Partition counts rather than a bare set because an existing topic with
+// too few partitions is a distinct problem from a missing one, and only the
+// former is invisible without counting.
+func topicPartitionCounts(conn *kafka.Conn) (map[string]int, error) {
+	partitions, err := conn.ReadPartitions()
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int, len(partitions))
+	for _, partition := range partitions {
+		counts[partition.Topic]++
+	}
+	return counts, nil
+}
+
+// waitForTopics polls broker metadata until every name is visible, returning
+// whichever are still absent once it stops waiting. A non-empty result is a real
+// failure, not impatience: the poll only gives up after topicVerifyTimeout.
+func waitForTopics(ctx context.Context, conn *kafka.Conn, names []string) ([]string, error) {
+	deadline := time.Now().Add(topicVerifyTimeout)
+	for {
+		counts, err := topicPartitionCounts(conn)
+		if err != nil {
+			return nil, err
+		}
+		var absent []string
+		for _, name := range names {
+			if _, ok := counts[name]; !ok {
+				absent = append(absent, name)
+			}
+		}
+		if len(absent) == 0 || time.Now().After(deadline) {
+			return absent, nil
+		}
+		select {
+		case <-ctx.Done():
+			return absent, ctx.Err()
+		case <-time.After(topicVerifyInterval):
+		}
+	}
 }
 
 func WaitForKafka(ctx context.Context, cfg Config, brokers []string, logger *zap.Logger) error {

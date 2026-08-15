@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -13,9 +16,30 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	// Shortest gap between two EnsureTopics passes driven by publish failures. A
+	// broker that came back without its topics fails every publish at once, and one
+	// pass repairs all of them, so the rest must not each fire their own
+	// CreateTopics round trip.
+	topicRecoveryCooldown = 30 * time.Second
+
+	// Ceiling on a single recovery pass. Publishes on other topics queue behind it,
+	// so it has to fail fast rather than inherit the caller's deadline.
+	topicRecoveryTimeout = 10 * time.Second
+)
+
 type Publisher struct {
 	writers map[string]*kafka.Writer
 	logger  *zap.Logger
+
+	// Topics are otherwise only ensured once, at startup. A broker that restarts
+	// on empty storage therefore stays broken for the whole remaining lifetime of
+	// this process, with every publish failing on a topic nothing will recreate --
+	// so the publisher keeps what it needs to run EnsureTopics again itself.
+	cfg            Config
+	recoveryMu     sync.Mutex
+	lastRecovery   time.Time
+	lastRecoveryOK bool
 }
 
 func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
@@ -81,6 +105,7 @@ func NewPublisher(cfg Config, logger *zap.Logger) (*Publisher, error) {
 	return &Publisher{
 		writers: writers,
 		logger:  logger,
+		cfg:     cfg,
 	}, nil
 }
 
@@ -139,7 +164,15 @@ func (p *Publisher) publish(ctx context.Context, topic, key string, payload any)
 	}
 
 	start := time.Now()
-	if err := writer.WriteMessages(ctx, msg); err != nil {
+	err = writer.WriteMessages(ctx, msg)
+	// A missing topic is the one publish failure this service can repair on the
+	// spot, so it gets exactly one retry behind a recovery pass. Every other error
+	// (broker down, timeout, serialization) falls straight through -- retrying those
+	// here would only duplicate what the writer's own MaxAttempts already does.
+	if isUnknownTopicError(err) && p.recoverTopics(ctx, topic) {
+		err = writer.WriteMessages(ctx, msg)
+	}
+	if err != nil {
 		p.logger.Error("kafka published failed",
 			zap.String("topic", topic),
 			zap.String("key", key),
@@ -156,6 +189,68 @@ func (p *Publisher) publish(ctx context.Context, topic, key string, payload any)
 		zap.Int("bytes", len(data)),
 	)
 	return nil
+}
+
+// isUnknownTopicError reports whether err is the broker refusing a produce for a
+// topic it does not have.
+//
+// Matched on the wire description as well as on the sentinel because kafka-go
+// reaches this code through more than one shape: the bare Error from a direct
+// produce, and aggregate types wrapping per-message failures that do not always
+// unwrap back to it.
+func isUnknownTopicError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, kafka.UnknownTopicOrPartition) {
+		return true
+	}
+	return strings.Contains(err.Error(), kafka.UnknownTopicOrPartition.Error())
+}
+
+// recoverTopics re-runs EnsureTopics after a publish found its topic missing, and
+// reports whether the caller has any reason to retry.
+//
+// Serialized and rate-limited on purpose. A broker that lost its topics fails
+// every in-flight publish at once, and a single pass repairs all of them, so
+// callers that arrive during a pass wait for it and then reuse its verdict rather
+// than each issuing their own CreateTopics.
+//
+// Only reachable for synchronous writers: an async writer returns nil from
+// WriteMessages and surfaces failures through its ErrorLogger instead, so
+// frame.ready gets no repair from here when cfg.Async is on.
+func (p *Publisher) recoverTopics(ctx context.Context, topic string) bool {
+	p.recoveryMu.Lock()
+	defer p.recoveryMu.Unlock()
+
+	if time.Since(p.lastRecovery) < topicRecoveryCooldown {
+		// The cooldown exists to throttle CreateTopics, not to deny a retry that a
+		// just-completed pass already earned -- so callers queued behind a successful
+		// one are told to go ahead.
+		return p.lastRecoveryOK
+	}
+	p.lastRecovery = time.Now()
+	p.lastRecoveryOK = false
+
+	p.logger.Warn("publish hit a missing topic, re-ensuring topics", zap.String("topic", topic))
+
+	// Detached from the caller's cancellation. The publish that triggers this is
+	// often the last act of a closing peer, and a topic that needs creating must
+	// still get created -- if not for this message, then for every one after it.
+	ensureCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), topicRecoveryTimeout)
+	defer cancel()
+
+	if err := EnsureTopics(ensureCtx, p.cfg, p.cfg.Brokers, p.logger); err != nil {
+		p.logger.Error("topic re-ensure failed",
+			zap.String("topic", topic),
+			zap.Error(err),
+		)
+		return false
+	}
+
+	p.lastRecoveryOK = true
+	p.logger.Info("topics re-ensured after missing-topic publish failure", zap.String("topic", topic))
+	return true
 }
 
 func (p *Publisher) Close() error {

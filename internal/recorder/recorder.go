@@ -86,7 +86,16 @@ func StartRecorder(sdpPath, outDir string, segmentSeconds, reorderQueueSize, max
 		"-segment_format", "mp4",
 		"-segment_list", segmentListPath,
 		"-segment_list_type", "flat",
-		"-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+		// Passed through segment_format_options, NOT as a bare -movflags: the
+		// output format here is "segment", and a bare -movflags lands on that
+		// muxer, which has no such option and drops it without complaint. The
+		// segments then come out as ordinary MP4s -- ftyp/free/mdat, with the moov
+		// written only at trailer time -- so any segment whose ffmpeg died before
+		// finalizing (force-kill at shutdown, crash, power loss) is a total loss:
+		// "moov atom not found", nothing recoverable. Reaching the mp4 muxer, these
+		// flags put the moov up front and fragment the rest, so a truncated segment
+		// still plays up to the last complete fragment.
+		"-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof",
 		filepath.Join(outDir, "%04d.mp4"),
 	}
 
@@ -233,7 +242,19 @@ func (r *Recorder) shutdown(timeout time.Duration) {
 	}
 
 	quitSentAt := time.Now()
+	// Both, because they reach ffmpeg through different paths and only one of them
+	// works when it matters. "q" is read between iterations of the transcode loop,
+	// which is fine while packets are still flowing -- and useless here, since the
+	// loop is parked inside av_read_frame waiting on RTP that stopped the instant
+	// the peer went away. SIGINT is what breaks that wait. It is also the only
+	// graceful stop on Windows, where interruptProcessGroup is a no-op.
 	_, _ = io.WriteString(r.stdin, "q\n")
+	if err := interruptProcessGroup(r.cmd); err != nil {
+		r.logger.Warn("interrupt ffmpeg recorder failed, falling back to stdin quit",
+			zap.String("outDir", r.outDir),
+			zap.Error(err),
+		)
+	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
