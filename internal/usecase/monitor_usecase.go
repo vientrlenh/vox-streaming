@@ -240,6 +240,9 @@ func (u *MonitorUseCase) PublishAlert(ctx context.Context, alert domain.AlertEve
 	if eventID == "" {
 		eventID = uuid.NewString()
 	}
+	// Gán trước cả hai nhánh phát, để bản live và bản durable của cùng một cảnh báo mang cùng một id.
+	// Đó là điều kiện để phía đọc gộp lịch sử với luồng trực tiếp mà không đếm trùng.
+	alert.EventID = eventID
 	alert = u.enrichAlertIdentity(ctx, alert)
 	if alert.Level == "" {
 		alert.Level = domain.DefaultAlertLevel(alert.AlertType)
@@ -262,7 +265,6 @@ func (u *MonitorUseCase) PublishAlert(ctx context.Context, alert domain.AlertEve
 	var durErr error
 	if u.alertPublisher != nil {
 		durErr = u.alertPublisher.PublishAlertRaised(ctx, domain.AlertRaisedEvent{
-			EventID: eventID, 
 			RaisedAt: time.Now().UTC(),
 			AlertEvent: alert,
 		}, )

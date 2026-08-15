@@ -134,6 +134,14 @@ func DefaultAlertLevel(alertType string) AlertLevel {
 }
 
 type AlertEvent struct {
+	// EventID định danh duy nhất một cảnh báo, sinh ở MonitorUseCase.PublishAlert và mang theo trên
+	// CẢ HAI nhánh phát.
+	//
+	// Nhánh durable cần nó để chống ghi trùng: Kafka gửi lại là chuyện bình thường, và một sổ audit
+	// đếm sai số lần vi phạm thì tệ hơn là không có sổ. Nhánh live cần đúng nó để giao diện gộp được
+	// lịch sử đọc từ DB với cảnh báo đang chảy về mà không nhân đôi -- trước đây trường này chỉ có ở
+	// AlertRaisedEvent, nên phía live phải ghép khoá tổ hợp và không bao giờ khử trùng chắc chắn.
+	EventID       string     `json:"eventId"`
 	Source        string     `json:"source"`
 	SessionID    string     `json:"sessionId"`
 	ParticipantID string     `json:"participantId"`
@@ -172,8 +180,10 @@ const (
 	AlertRecordingIncomplete = "RECORDING_INCOMPLETE"
 )
 
+// AlertRaisedEvent là AlertEvent đi trên nhánh durable (Kafka). EventID nằm trong AlertEvent chứ
+// không lặp lại ở đây: hai trường cùng tên json trong một struct lồng nhau thì trường ngoài lặng lẽ
+// thắng, và một hợp đồng mà cùng một khoá có hai nguồn là thứ sớm muộn cũng lệch nhau.
 type AlertRaisedEvent struct {
-	EventID  string    `json:"eventId"`
 	RaisedAt time.Time `json:"raisedAt"`
 	AlertEvent
 }
