@@ -138,7 +138,7 @@ func NewHandler(
 				// (rejected every real request in prod, confirmed live 2026-08-11:
 				// "websocket origin rejected" for https://voxenta.net against
 				// allowed=["*"]).
-				if slices.Contains(allowedOrigins, "*") || slices.Contains(allowedOrigins, origin) {
+				if slices.Contains(allowedOrigins, origin) {
 					return true
 				}
 				// gorilla's own rejection names neither the origin it saw nor the list
