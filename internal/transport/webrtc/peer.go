@@ -750,6 +750,7 @@ func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
 			track.Codec().RTPCodecCapability,
 			RelayMeta{
 				ScheduleID:        p.scheduleID,
+				SessionID:     p.sessionID,
 				ParticipantID: p.participantID,
 				StreamID:      p.streamID,
 				StreamType:    p.streamType,

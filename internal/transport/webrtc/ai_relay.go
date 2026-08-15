@@ -35,6 +35,13 @@ type AIRelayOptions struct {
 // make sure AI detect the correct student
 type RelayMeta struct {
 	ScheduleID        string
+	// SessionID là id phiên thi -- khoá mà MỌI cảnh báo sinh ra từ luồng này sẽ mang theo.
+	//
+	// Thiếu nó, AI service không có gì để định danh phiên nên rơi về uuid4() (xem
+	// controller/webrtc.py), và cảnh báo chạy dưới một id ngẫu nhiên: nhánh live publish vào một
+	// kênh Redis không màn hình nào nghe, còn nhánh durable thì Java tra không ra phiên thi rồi
+	// lặng lẽ bỏ qua. Nói cách khác cảnh báo vẫn được phát ra đầy đủ, chỉ là không tới được ai.
+	SessionID     string
 	ParticipantID string
 	StreamID      string
 	StreamType    string
@@ -240,6 +247,10 @@ type aiOfferRequest struct {
 	SDP           string `json:"sdp"`
 	Type          string `json:"type"`
 	ScheduleID        string `json:"scheduleId"`
+	// Khoá AI service dùng làm session_id cho mọi cảnh báo của luồng này. Tên trường phải đúng
+	// `sessionId`: đó là khoá thứ hai mà controller/webrtc.py tìm, sau `exam_attempt_id` của
+	// đường WPF nối thẳng.
+	SessionID     string `json:"sessionId"`
 	ParticipantID string `json:"participantId"`
 	StreamID      string `json:"streamId"`
 	StreamType    string `json:"streamType"`
@@ -256,6 +267,7 @@ func (r *AIRelay) postOffer(ctx context.Context, sdp string) (answerSDP, connID 
 		SDP:           sdp,
 		Type:          "offer",
 		ScheduleID:        r.meta.ScheduleID,
+		SessionID:     r.meta.SessionID,
 		ParticipantID: r.meta.ParticipantID,
 		StreamID:      r.meta.StreamID,
 		StreamType:    r.meta.StreamType,

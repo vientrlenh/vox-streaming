@@ -10,8 +10,8 @@ func TestDefaultAlertLevel(t *testing.T) {
 		{AlertPhoneDetected, AlertLevelCritical},
 		{AlertMultiplePersons, AlertLevelCritical},
 		{AlertProhibitedObject, AlertLevelCritical},
-		{AlertFaceNotVisible, AlertLevelWarning},
-		{AlertSuspiciousGaze, AlertLevelWarning},
+		{AlertPersonMissing, AlertLevelWarning},
+		{AlertUncooperativeCandidate, AlertLevelWarning},
 		{AlertStreamDropped, AlertLevelWarning},
 		{AlertTrackEnded, AlertLevelWarning},
 		{AlertReconnectLoop, AlertLevelWarning},
@@ -19,6 +19,11 @@ func TestDefaultAlertLevel(t *testing.T) {
 		{AlertWindowFocusLost, AlertLevelWarning},
 		{"SOME_UNKNOWN_ALERT_TYPE", AlertLevelInfo},
 		{"", AlertLevelInfo},
+		// Tên cũ của hai loại vừa đổi. Chúng RƠI VỀ INFO và điều đó là đúng: nguồn phát không còn
+		// dùng chúng nữa, nên một message mang tên cũ nghĩa là có bản cũ chưa deploy xong. Bản ghi
+		// lịch sử trong DB thì đã được migration V37 nâng mức, không phụ thuộc vào hàm này.
+		{"OBJECT_DETECTED", AlertLevelInfo},
+		{"CRITICAL_VIOLATION", AlertLevelInfo},
 	}
 	for _, tt := range tests {
 		t.Run(tt.alertType, func(t *testing.T) {

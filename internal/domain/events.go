@@ -122,11 +122,24 @@ const (
 	AlertSourceStreaming = "streaming"
 )
 
+// DefaultAlertLevel xếp một loại cảnh báo vào thang ba mức. Thang này định nghĩa theo VIỆC GIÁM THỊ
+// PHẢI LÀM, không theo cảm nhận nặng/nhẹ -- có vậy mới trả lời được câu "cái này để mức nào" mà
+// không ai phải đoán:
+//
+//   - CRITICAL: cần can thiệp NGAY trong lúc thi, giám thị đứng dậy đi tới chỗ thí sinh.
+//   - WARNING:  xem lại lúc chấm, hoặc để mắt thêm; không dừng bài.
+//   - INFO:     chỉ ghi vào sổ, không đẩy lên lưới giám sát.
+//
+// Đây là nơi DUY NHẤT quyết định mức. Giá trị được đóng dấu vào cả nhánh live lẫn nhánh durable nên
+// giám thị trực tiếp và người chấm sau thi luôn thấy cùng một mức; phía đọc chỉ việc hiển thị chứ
+// không giữ bảng thứ hai để suy lại. Một bảng thứ hai ở client là thứ sẽ lệch khỏi bảng này đúng vào
+// lần thêm loại cảnh báo tiếp theo.
 func DefaultAlertLevel(alertType string) AlertLevel {
 	switch alertType {
 	case AlertPhoneDetected, AlertMultiplePersons, AlertProhibitedObject:
 		return AlertLevelCritical
-	case AlertFaceNotVisible, AlertSuspiciousGaze, AlertStreamDropped, AlertTrackEnded, AlertReconnectLoop, AlertRecordingIncomplete, AlertWindowFocusLost:
+	case AlertPersonMissing, AlertWindowFocusLost, AlertUncooperativeCandidate,
+		AlertStreamDropped, AlertTrackEnded, AlertReconnectLoop, AlertRecordingIncomplete:
 		return AlertLevelWarning
 	default:
 		return AlertLevelInfo
@@ -156,22 +169,39 @@ type AlertEvent struct {
 }
 
 const (
-	// AI detect alerts
+	// AI detect alerts -- YOLO chạy trên khung hình camera.
 	AlertPhoneDetected    = "PHONE_DETECTED"
 	AlertMultiplePersons  = "MULTIPLE_PERSONS"
-	AlertFaceNotVisible   = "FACE_NOT_VISIBLE"
-	AlertSuspiciousGaze   = "SUSPICIOUS_GAZE"
 	AlertProhibitedObject = "PROHIBITED_OBJECT"
+
+	// Detector CHỈ đếm số người trong khung: không có nhận diện khuôn mặt, không có ước lượng
+	// hướng nhìn. Tên phải nói đúng thứ đo được, vì đây là sổ bằng chứng -- một cái tên hứa nhiều
+	// hơn phép đo sẽ được đọc như thể hệ thống đã thấy thứ nó chưa từng thấy.
+	//
+	// Hai hằng số cũ FACE_NOT_VISIBLE và SUSPICIOUS_GAZE bỏ đi cùng lý do: chúng đặt tên cho hai
+	// phép phát hiện không tồn tại trong hệ, và chưa nguồn nào từng phát chúng.
+	AlertPersonMissing = "PERSON_MISSING"
 
 	// Client detect alerts -- do chinh app thi bao len, khong phai suy ra tu video.
 	//
 	// Thi sinh roi khoi cua so thi (WPF Window.Deactivated -> WS focus_lost -> Python
-	// push_alert). Xep WARNING ngang FACE_NOT_VISIBLE, khong phai CRITICAL: mat focus co rat
+	// push_alert). Xep WARNING ngang PERSON_MISSING, khong phai CRITICAL: mat focus co rat
 	// nhieu nguyen nhan vo tinh -- popup Windows Update, thong bao he thong, tro chuot ra man
 	// hinh phu -- nen de CRITICAL se lam giam thi quen dan voi muc canh bao cao nhat, va do
 	// moi la thu lam hong ca he thong canh bao. Client da gop cac lan cach nhau duoi 3 giay
 	// nen moi canh bao toi day la mot lan roi di that; nhieu lan don dap moi dang nghi.
 	AlertWindowFocusLost = "WINDOW_FOCUS_LOST"
+
+	// Exam flow detect alerts -- do đồ thị hội thoại phía AI kết luận, không suy ra từ video.
+	//
+	// Thí sinh đã được nhắc một lần vì câu trả lời thiếu hợp tác, tới lần thứ hai thì AI bỏ qua câu
+	// đó và đi tiếp (repeat_recovery: uncooperative_move_on). WARNING chứ không CRITICAL: nó không
+	// phải bằng chứng gian lận, bài thi đã tự xử lý xong, và nó là phán đoán của LLM về thái độ --
+	// loại dữ liệu dễ sai nhất trong ba nguồn đang có.
+	//
+	// Tên cũ là CRITICAL_VIOLATION: đặt theo MỨC ĐỘ chứ không theo SỰ VIỆC. Cái tên đó tự khoá mức
+	// của chính nó -- hạ xuống WARNING là sinh ra bản ghi mâu thuẫn ngay trong một dòng.
+	AlertUncooperativeCandidate = "UNCOOPERATIVE_CANDIDATE"
 
 	// Streaming service detect alerts
 	AlertStreamDropped       = "STREAM_DROPPED"
