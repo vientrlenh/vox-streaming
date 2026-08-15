@@ -140,6 +140,9 @@ type Peer struct {
 	logger  *zap.Logger
 
 	closedByFailure atomic.Bool
+	// announcedDisconnect gates the disconnected/reconnected pair so a flapping ICE connection
+	// publishes one transition per actual change instead of one per state callback.
+	announcedDisconnect atomic.Bool
 
 	done      chan struct{}
 	once      sync.Once
@@ -226,8 +229,26 @@ func (p *Peer) setupCallbacks() {
 				// before it exists.
 				go p.runSessionHeartbeat()
 			})
+			// Only after a disconnect was actually announced, so the first connect of a stream
+			// doesn't publish a "reconnected" nobody was waiting for.
+			if p.announcedDisconnect.CompareAndSwap(true, false) {
+				p.logger.Info("peer reconnected within grace period")
+				p.monitorUseCase.NotifyReconnected(
+					context.Background(), p.scheduleID, p.sessionID, p.participantID, p.streamID, p.streamType,
+				)
+			}
 		case webrtc.PeerConnectionStateDisconnected:
 			p.logger.Warn("peer disconnected, starting grace period")
+			// Told to the monitor NOW, not when the grace period ends. The 30s below is a reconnect
+			// window for the RECORDING -- worth keeping, because a brief blip should not tear down
+			// an exam's evidence -- but it is not a reason to leave a proctor staring at a frozen
+			// tile with no explanation for half a minute. The two concerns get separate answers:
+			// the recording waits, the human is told immediately.
+			if p.announcedDisconnect.CompareAndSwap(false, true) {
+				p.monitorUseCase.NotifyDisconnected(
+					context.Background(), p.scheduleID, p.sessionID, p.participantID, p.streamID, p.streamType,
+				)
+			}
 			p.scheduleClose(30 * time.Second)
 
 		case webrtc.PeerConnectionStateFailed:
@@ -898,6 +919,22 @@ func (p *Peer) close() {
 		close(p.done)
 		duration := int64(time.Since(p.startedAt).Seconds())
 		ctx := context.Background()
+
+		// FIRST, before any of the recording teardown below.
+		//
+		// The monitor's "this student is gone" signal used to be a side effect of NotifyStreamEnded
+		// at the very bottom of this function -- published to Kafka, consumed back by this same
+		// service, and only then relayed to monitors. Everything between here and there is
+		// archival work: stopping ffmpeg, draining segment uploads (bounded at a full 60s), draining
+		// HLS uploads. So the answer to "did my student just disappear?" was queued behind
+		// "has the recording finished uploading?", and on a bad upload that is over a minute of a
+		// grid tile that is simply frozen, telling the proctor nothing.
+		//
+		// Publishing straight to the monitor channel here is instant and, being Redis pub/sub,
+		// just as instance-agnostic as the Kafka round trip was. That round trip still runs at the
+		// bottom -- it carries segment keys and duration, which genuinely do need the drain, and its
+		// own NotifyLeft stays as a second chance if this publish is the one that gets lost.
+		p.monitorUseCase.NotifyLeft(ctx, p.scheduleID, p.sessionID, p.participantID, p.streamID, p.streamType)
 
 		var ffmpegSegments []cache.SegmentMeta
 		ffmpegGaveUp := false

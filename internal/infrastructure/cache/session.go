@@ -79,6 +79,23 @@ func (r *SessionRegistry) ScanAll(ctx context.Context) ([]SessionInfo, error) {
 	return r.scanByPattern(ctx, "streaming-session:*")
 }
 
+// ScanSession returns the live stream registrations belonging to one exam session -- normally one
+// per stream type (camera, screen).
+//
+// This exists so the service can repair alerts that arrive knowing only which exam session they
+// belong to. The AI proctoring service is the case in point: on the direct client path it is handed
+// an exam attempt id and nothing else, so it cannot name the candidate or the stream even in
+// principle. This service can, because it is the one that minted the peer from the student's stream
+// token, and that mapping is exactly what these keys hold.
+func (r *SessionRegistry) ScanSession(ctx context.Context, sessionID string) ([]SessionInfo, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+	// Redis glob '*' spans ':' too, so this matches the schedule segment before the session id and
+	// the participant/streamType segments after it.
+	return r.scanByPattern(ctx, fmt.Sprintf("streaming-session:*:%s:*", sessionID))
+}
+
 func sessionKey(scheduleID, sessionID, participantID, streamType string) string {
 	return fmt.Sprintf("streaming-session:%s:%s:%s:%s", scheduleID, sessionID, participantID, streamType)
 }

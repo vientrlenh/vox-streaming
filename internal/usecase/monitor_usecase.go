@@ -28,6 +28,7 @@ type ScheduleSummary struct {
 type SessionScanner interface {
 	ScanSchedule(ctx context.Context, scheduleID string) ([]cache.SessionInfo, error)
 	ScanAll(ctx context.Context) ([]cache.SessionInfo, error)
+	ScanSession(ctx context.Context, sessionID string) ([]cache.SessionInfo, error)
 }
 
 type ParticipantEventer interface {
@@ -147,24 +148,32 @@ func (u *MonitorUseCase) FindLiveStream(ctx context.Context, scheduleID, streamI
 }
 
 func (u *MonitorUseCase) NotifyJoined(ctx context.Context, scheduleID, sessionID, participantID, streamID, streamType string) {
-	u.participantEventer.PublishParticipantEvent(ctx, scheduleID, domain.ParticipantEvent{
-		Type: domain.ParticipantJoined,
-		SessionID: sessionID,
-		ParticipantID: participantID,
-		StreamID: streamID,
-		StreamType: streamType,
-		At: time.Now().UTC(),
-	})
+	u.notifyParticipant(ctx, domain.ParticipantJoined, scheduleID, sessionID, participantID, streamID, streamType)
 }
 
 func (u *MonitorUseCase) NotifyLeft(ctx context.Context, scheduleID, sessionID, participantID, streamID, streamType string) {
+	u.notifyParticipant(ctx, domain.ParticipantLeft, scheduleID, sessionID, participantID, streamID, streamType)
+}
+
+// NotifyDisconnected reports that a stream's transport dropped while the stream is still open --
+// the peer is inside its reconnect grace period and may yet recover. Pair with NotifyReconnected.
+func (u *MonitorUseCase) NotifyDisconnected(ctx context.Context, scheduleID, sessionID, participantID, streamID, streamType string) {
+	u.notifyParticipant(ctx, domain.ParticipantDisconnected, scheduleID, sessionID, participantID, streamID, streamType)
+}
+
+// NotifyReconnected reports that a stream previously announced as disconnected is back.
+func (u *MonitorUseCase) NotifyReconnected(ctx context.Context, scheduleID, sessionID, participantID, streamID, streamType string) {
+	u.notifyParticipant(ctx, domain.ParticipantReconnected, scheduleID, sessionID, participantID, streamID, streamType)
+}
+
+func (u *MonitorUseCase) notifyParticipant(ctx context.Context, eventType, scheduleID, sessionID, participantID, streamID, streamType string) {
 	u.participantEventer.PublishParticipantEvent(ctx, scheduleID, domain.ParticipantEvent{
-		Type: domain.ParticipantLeft,
-		SessionID: sessionID,
+		Type:          eventType,
+		SessionID:     sessionID,
 		ParticipantID: participantID,
-		StreamID: streamID,
-		StreamType: streamType,
-		At: time.Now().UTC(),
+		StreamID:      streamID,
+		StreamType:    streamType,
+		At:            time.Now().UTC(),
 	})
 }
 
@@ -173,10 +182,65 @@ func (u *MonitorUseCase) SubscribeEvents(ctx context.Context, scheduleID string)
 }
 
 
+// enrichAlertIdentity fills in a participant/stream id the caller could not supply, looking it up
+// from this service's own session registry by exam session id.
+//
+// The alert producers are not all equally informed, and the least informed one is not fixable at
+// the source: the AI proctoring service on its direct client path receives only an exam attempt id,
+// so it has no way to know which candidate or which stream that is. Rather than let it guess -- it
+// used to copy the session id into all three fields, which is how monitors ended up printing a raw
+// UUID where a student name belongs, and how AI alerts stopped matching any tile on the grid --
+// this service answers the question itself. It is the right place to: it minted the peer from the
+// student's stream token, so it is the only participant in the chain that ever knew the mapping.
+//
+// A blank result is left blank. A wrong id is worse than a missing one, because a missing one shows
+// up as a gap and a wrong one shows up as somebody else.
+func (u *MonitorUseCase) enrichAlertIdentity(ctx context.Context, alert domain.AlertEvent) domain.AlertEvent {
+	needsParticipant := alert.ParticipantID == "" || alert.ParticipantID == alert.SessionID
+	needsStream := alert.StreamID == "" || alert.StreamID == alert.SessionID
+	if alert.SessionID == "" || (!needsParticipant && !needsStream) {
+		return alert
+	}
+
+	sessions, err := u.scanner.ScanSession(ctx, alert.SessionID)
+	if err != nil {
+		u.logger.Warn("resolve alert identity failed, forwarding alert as received",
+			zap.String("sessionId", alert.SessionID),
+			zap.Error(err),
+		)
+		return alert
+	}
+	if len(sessions) == 0 {
+		return alert
+	}
+
+	// Prefer the registration matching the alert's own stream type; a session normally has one per
+	// type and picking blindly would credit a camera alert to the screen stream.
+	match := sessions[0]
+	for _, session := range sessions {
+		if alert.StreamType != "" && session.StreamType == alert.StreamType {
+			match = session
+			break
+		}
+	}
+
+	if needsParticipant {
+		alert.ParticipantID = match.ParticipantID
+	}
+	if needsStream {
+		alert.StreamID = match.StreamID
+	}
+	if alert.StreamType == "" {
+		alert.StreamType = match.StreamType
+	}
+	return alert
+}
+
 func (u *MonitorUseCase) PublishAlert(ctx context.Context, alert domain.AlertEvent, eventID string) error {
 	if eventID == "" {
 		eventID = uuid.NewString()
 	}
+	alert = u.enrichAlertIdentity(ctx, alert)
 	if alert.Level == "" {
 		alert.Level = domain.DefaultAlertLevel(alert.AlertType)
 	}

@@ -73,6 +73,20 @@ const (
 	pongWait      = 60 * time.Second
 	pingPeriod    = 45 * time.Second
 	maxMsgSize    = 64 * 1024
+
+	// How often a connected monitor is re-sent the full picture of who is live.
+	//
+	// Everything else a monitor learns after connecting arrives as a delta over Redis pub/sub, which
+	// is fire-and-forget: a subscriber that is momentarily behind, a Redis blip, a Kafka consumer
+	// rebalance, and that delta is gone with nothing to replay it. Deltas alone therefore let a
+	// monitor drift from reality and never come back -- a tile frozen for the rest of the exam
+	// because the one "left" event that would have retired it was dropped.
+	//
+	// A periodic snapshot makes that drift self-healing: whatever was missed is corrected within one
+	// interval, without the client having to detect anything. The interval is a Redis SCAN per
+	// monitor, so it is deliberately slower than the frame cadence -- this is a reconciliation
+	// backstop, not the primary path.
+	monitorSnapshotPeriod = 15 * time.Second
 )
 
 func NewHandler(
@@ -337,11 +351,34 @@ func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	snapshotTicker := time.NewTicker(monitorSnapshotPeriod)
+	defer snapshotTicker.Stop()
+
 	// write loop, dùng cho merge frame và participant events
 	for {
 		select {
 		case<-ctx.Done():
 			return
+		case <-snapshotTicker.C:
+			fresh, err := h.monitorUseCase.GetScheduleSnapshot(ctx, scheduleID)
+			if err != nil {
+				// Skip this round rather than closing: a transient Redis error should cost the
+				// monitor one reconciliation, not its live connection.
+				h.logger.Warn("periodic schedule snapshot failed",
+					zap.String("scheduleId", scheduleID),
+					zap.Error(err),
+				)
+				continue
+			}
+			// Also repairs alert routing, not just the tile grid. Alert subscriptions are opened
+			// per exam session off the snapshot and the 'joined' events; a 'joined' that never
+			// arrives means that student's alerts had nowhere to go for the rest of the exam.
+			for _, stream := range fresh {
+				subscribeSession(stream.SessionID)
+			}
+			if err := conn.WriteJSON(newSnapshotMessage(fresh)); err != nil {
+				return
+			}
 		case notif, ok := <-frameCh:
 			if !ok {
 				return

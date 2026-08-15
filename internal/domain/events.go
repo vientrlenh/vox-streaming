@@ -96,6 +96,17 @@ type ParticipantEvent struct {
 const (
 	ParticipantJoined = "joined"
 	ParticipantLeft   = "left"
+
+	// ParticipantDisconnected/ParticipantReconnected report the TRANSPORT dropping and coming back
+	// inside the peer's grace period, while the stream itself is still open.
+	//
+	// They exist because "left" is far too late to be a monitor's only warning: it is published from
+	// Peer.close(), which runs 30s of grace after ICE first noticed, and a monitor that only learns
+	// then has spent that whole time showing a frozen tile with no explanation. These two say what
+	// is happening the moment it happens, and the reconnect case says so as well -- a blip that
+	// heals must clear the warning, not leave it standing until someone reloads the page.
+	ParticipantDisconnected = "disconnected"
+	ParticipantReconnected  = "reconnected"
 )
 
 type AlertLevel string
