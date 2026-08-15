@@ -126,7 +126,7 @@ func DefaultAlertLevel(alertType string) AlertLevel {
 	switch alertType {
 	case AlertPhoneDetected, AlertMultiplePersons, AlertProhibitedObject:
 		return AlertLevelCritical
-	case AlertFaceNotVisible, AlertSuspiciousGaze, AlertStreamDropped, AlertTrackEnded, AlertReconnectLoop, AlertRecordingIncomplete:
+	case AlertFaceNotVisible, AlertSuspiciousGaze, AlertStreamDropped, AlertTrackEnded, AlertReconnectLoop, AlertRecordingIncomplete, AlertWindowFocusLost:
 		return AlertLevelWarning
 	default:
 		return AlertLevelInfo
@@ -154,6 +154,16 @@ const (
 	AlertFaceNotVisible   = "FACE_NOT_VISIBLE"
 	AlertSuspiciousGaze   = "SUSPICIOUS_GAZE"
 	AlertProhibitedObject = "PROHIBITED_OBJECT"
+
+	// Client detect alerts -- do chinh app thi bao len, khong phai suy ra tu video.
+	//
+	// Thi sinh roi khoi cua so thi (WPF Window.Deactivated -> WS focus_lost -> Python
+	// push_alert). Xep WARNING ngang FACE_NOT_VISIBLE, khong phai CRITICAL: mat focus co rat
+	// nhieu nguyen nhan vo tinh -- popup Windows Update, thong bao he thong, tro chuot ra man
+	// hinh phu -- nen de CRITICAL se lam giam thi quen dan voi muc canh bao cao nhat, va do
+	// moi la thu lam hong ca he thong canh bao. Client da gop cac lan cach nhau duoi 3 giay
+	// nen moi canh bao toi day la mot lan roi di that; nhieu lan don dap moi dang nghi.
+	AlertWindowFocusLost = "WINDOW_FOCUS_LOST"
 
 	// Streaming service detect alerts
 	AlertStreamDropped       = "STREAM_DROPPED"

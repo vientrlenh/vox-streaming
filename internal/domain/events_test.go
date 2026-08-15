@@ -16,6 +16,7 @@ func TestDefaultAlertLevel(t *testing.T) {
 		{AlertTrackEnded, AlertLevelWarning},
 		{AlertReconnectLoop, AlertLevelWarning},
 		{AlertRecordingIncomplete, AlertLevelWarning},
+		{AlertWindowFocusLost, AlertLevelWarning},
 		{"SOME_UNKNOWN_ALERT_TYPE", AlertLevelInfo},
 		{"", AlertLevelInfo},
 	}
