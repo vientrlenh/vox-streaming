@@ -25,9 +25,26 @@ func NewAlertServer(mu *usecase.MonitorUseCase, logger *zap.Logger) *AlertServer
 	}
 }
 
+// PushAlert nhận cảnh báo từ AI service.
+//
+// participantId CỐ Ý không bắt buộc. Bên phát không phải lúc nào cũng biết thí sinh nào: đường WS
+// của bài thi và đường WebRTC nối thẳng từ app thi chỉ cầm mỗi exam attempt id, nên chúng gửi rỗng
+// đúng như hợp đồng đã thoả thuận -- "không biết thì để rỗng, đừng lấy id khác điền vào", vì một id
+// bịa thì service này không phân biệt nổi với id thật và sẽ gắn vi phạm sang hồ sơ người khác.
+// enrichAlertIdentity ngay phía sau tra bù từ session registry, nơi duy nhất biết ánh xạ đó.
+//
+// Bắt buộc trường này từng làm mọi cảnh báo WINDOW_FOCUS_LOST bị chặn ngay ở cửa, và chặn im lặng:
+// hàm return trước mọi lệnh log nên phía streaming không để lại dấu vết nào, còn phía gọi chỉ thấy
+// một InvalidArgument chung chung. Đó là lý do nhánh từ chối bên dưới có log riêng.
 func (s *AlertServer) PushAlert(ctx context.Context, req *alertv1.PushAlertRequest) (*alertv1.PushAlertResponse, error) {
-	if req.SessionId == "" || req.ParticipantId == "" || req.AlertType == "" {
-		return nil, status.Error(codes.InvalidArgument, "scheduleId, participantId, alertType are required")
+	if req.SessionId == "" || req.AlertType == "" {
+		s.logger.Warn("alert rejected: thiếu trường bắt buộc",
+			zap.String("sessionId", req.SessionId),
+			zap.String("alertType", req.AlertType),
+			zap.String("participantId", req.ParticipantId),
+			zap.String("streamId", req.StreamId),
+		)
+		return nil, status.Error(codes.InvalidArgument, "sessionId, alertType are required")
 	}
 
 	capturedAt := time.Now().UTC()
