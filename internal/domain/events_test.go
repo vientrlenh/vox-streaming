@@ -17,6 +17,8 @@ func TestDefaultAlertLevel(t *testing.T) {
 		{AlertReconnectLoop, AlertLevelWarning},
 		{AlertRecordingIncomplete, AlertLevelWarning},
 		{AlertWindowFocusLost, AlertLevelWarning},
+		// Bản ghi vẫn dùng được, chỉ đuôi cụt -- chỉ ghi vào sổ, không đẩy lên lưới giám sát.
+		{AlertRecordingTruncated, AlertLevelInfo},
 		{"SOME_UNKNOWN_ALERT_TYPE", AlertLevelInfo},
 		{"", AlertLevelInfo},
 		// Tên cũ của hai loại vừa đổi. Chúng RƠI VỀ INFO và điều đó là đúng: nguồn phát không còn

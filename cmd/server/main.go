@@ -613,7 +613,7 @@ func buildFFmpegIngestOptions(logger *zap.Logger) webrtcTransport.FFmpegIngestOp
 
 	stopTimeoutSecs, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_STOP_TIMEOUT_SECS"))
 	if stopTimeoutSecs == 0 {
-		stopTimeoutSecs = 5
+		stopTimeoutSecs = 60 // Default fallback, allowing 60 second for ffmpeg finalization
 	}
 
 	reorderQueueSize, _ := strconv.Atoi(os.Getenv("FFMPEG_INGEST_REORDER_QUEUE_SIZE"))

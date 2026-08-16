@@ -141,6 +141,10 @@ func DefaultAlertLevel(alertType string) AlertLevel {
 	case AlertPersonMissing, AlertWindowFocusLost, AlertUncooperativeCandidate,
 		AlertStreamDropped, AlertTrackEnded, AlertReconnectLoop, AlertRecordingIncomplete:
 		return AlertLevelWarning
+	// Ghi rõ ra dù nhánh default cũng trả INFO: đây là một lựa chọn, không phải một giá trị rơi
+	// vãi. "Không nhận ra loại này" và "loại này chỉ đáng ghi vào sổ" phải phân biệt được ở đây.
+	case AlertRecordingTruncated:
+		return AlertLevelInfo
 	default:
 		return AlertLevelInfo
 	}
@@ -202,6 +206,15 @@ const (
 	// Tên cũ là CRITICAL_VIOLATION: đặt theo MỨC ĐỘ chứ không theo SỰ VIỆC. Cái tên đó tự khoá mức
 	// của chính nó -- hạ xuống WARNING là sinh ra bản ghi mâu thuẫn ngay trong một dòng.
 	AlertUncooperativeCandidate = "UNCOOPERATIVE_CANDIDATE"
+
+	// Đuôi bản ghi có thể cụt: ffmpeg phải dừng cưỡng bức lúc kết thúc luồng, nhưng segment vẫn
+	// thu được và vẫn phát được (fragmented MP4). INFO chứ không WARNING: bản ghi dùng được, và
+	// cảnh báo này phát ra khi bài thi đã xong nên không có gì để giám thị can thiệp -- nó tồn tại
+	// cho người CHẤM biết vài giây cuối có thể thiếu.
+	//
+	// Tách khỏi RECORDING_INCOMPLETE vì gộp hai thứ lại khiến mọi phiên thi đều báo động, và một
+	// cảnh báo kêu ở mọi phiên thì không còn nói lên điều gì.
+	AlertRecordingTruncated = "RECORDING_TRUNCATED"
 
 	// Streaming service detect alerts
 	AlertStreamDropped       = "STREAM_DROPPED"

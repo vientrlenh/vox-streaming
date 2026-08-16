@@ -939,6 +939,10 @@ func (p *Peer) close() {
 
 		var ffmpegSegments []cache.SegmentMeta
 		ffmpegGaveUp := false
+		// ffmpeg phải bị giết cưỡng bức, NHƯNG vẫn thu được segment: đuôi bản ghi có thể cụt vài
+		// giây, phần còn lại xem bình thường. Đây là chuyện khác hẳn với mất bản ghi, nên nó có
+		// đường đi riêng ở dưới thay vì gộp vào `incomplete`.
+		ffmpegTruncated := false
 		hadVideoTrack := false
 		if p.ffmpegIngest != nil {
 			p.ffmpegIngest.mu.Lock()
@@ -960,10 +964,11 @@ func (p *Peer) close() {
 				// the full teardown, so a slow/stuck upload can't also hold a
 				// capacity slot hostage.
 				sup.StopProcess()
-				if sup.LastAttemptForceKilled() {
-					p.logger.Warn("ffmpeg had to be force-killed at shutdown, marking recording incomplete (last segment may be truncated)")
-					p.ffmpegIngest.incomplete.Store(true)
-				}
+				// Bị force-kill CHƯA nói lên điều gì về bản ghi, nên đừng kết luận ở đây. Segment
+				// được ghi dạng fragmented MP4 (xem segment_format_options trong recorder.go) đúng
+				// để một segment bị giết giữa chừng vẫn phát được tới mảnh hoàn chỉnh cuối. Phán
+				// quyết nằm ở dưới, chỗ đã biết thu được bao nhiêu segment.
+				forceKilled := sup.LastAttemptForceKilled()
 				if slotHeld {
 					<-p.ffmpegIngestCfg.RecordSem
 					slotHeld = false
@@ -983,6 +988,28 @@ func (p *Peer) close() {
 				ffmpegSegments = append([]cache.SegmentMeta(nil), p.ffmpegIngest.segs...)
 				p.ffmpegIngest.segMu.Unlock()
 				ffmpegGaveUp = sup.GaveUp()
+
+				// Chỉ tới đây mới đủ dữ kiện để phân biệt hai chuyện mà trước đây bị gộp làm một:
+				//
+				//   - Không còn segment nào: bản ghi mất thật, đáng gọi giám thị.
+				//   - Còn segment: chỉ đuôi bị cắt. Bằng chứng vẫn dùng được, và người chấm chỉ cần
+				//     biết là vài giây cuối có thể thiếu.
+				//
+				// Gộp hai chuyện này khiến MỌI phiên thi đều sinh RECORDING_INCOMPLETE -- một cảnh
+				// báo kêu ở 100% số phiên thì không mang thông tin nào, và nó còn kéo theo hai hậu
+				// quả câm: MarkComplete không bao giờ chạy (bản ghi nào cũng phải chờ hết grace
+				// period mới được ghép), và thư mục tạm không bao giờ được dọn.
+				if forceKilled {
+					if len(ffmpegSegments) == 0 {
+						p.logger.Warn("ffmpeg bị force-kill và không thu được segment nào, bản ghi coi như mất")
+						p.ffmpegIngest.incomplete.Store(true)
+					} else {
+						ffmpegTruncated = true
+						p.logger.Info("ffmpeg bị force-kill lúc dừng, đuôi bản ghi có thể cụt",
+							zap.Int("segmentsCaptured", len(ffmpegSegments)),
+						)
+					}
+				}
 
 				go func() {
 					sup.Stop() // idempotent — StopProcess already ran; this just waits for doneCh (segCh drain) now
@@ -1066,6 +1093,25 @@ func (p *Peer) close() {
 				}, "",
 			); err != nil {
 				p.logger.Warn("recording incomplete alert failed", zap.Error(err))
+			}
+		} else if ffmpegTruncated && !p.closedByFailure.Load() {
+			// Nhánh riêng, và cố ý ở mức INFO: bản ghi dùng được, chỉ vài giây cuối là đáng ngờ.
+			// Người CHẤM cần biết điều đó khi xem lại đoạn cuối; giám thị đang coi thi thì không --
+			// lúc cảnh báo này phát ra thì luồng đã đóng và bài thi đã xong rồi.
+			if err := p.monitorUseCase.PublishAlert(
+				ctx, domain.AlertEvent{
+					Source:        domain.AlertSourceStreaming,
+					SessionID:     p.sessionID,
+					ParticipantID: p.participantID,
+					StreamID:      p.streamID,
+					StreamType:    p.streamType,
+					AlertType:     domain.AlertRecordingTruncated,
+					Detail:        fmt.Sprintf("ffmpeg bị dừng cưỡng bức lúc kết thúc; %d segment đã ghi, đoạn cuối có thể cụt", len(ffmpegSegments)),
+					Confidence:    1.0,
+					CapturedAt:    time.Now().UTC(),
+				}, "",
+			); err != nil {
+				p.logger.Warn("recording truncated alert failed", zap.Error(err))
 			}
 		}
 		if p.closedByFailure.Load() {
