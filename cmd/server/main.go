@@ -187,6 +187,14 @@ func main() {
 	inventoryRegistry := cache.NewInventoryRegistry(redisClient)
 	segmentUseCase := usecase.NewSegmentUseCase(storageClient, segmentRegistry, sessionRegistry, inventoryRegistry, logger)
 
+	// The durable floor under BOTH recording paths: a Redis due-set of streams that still owe a
+	// recording, swept by the watchdog below. It exists because every other trigger has a way to
+	// vanish -- the desktop client can crash before calling /complete, an in-process timer dies with
+	// the process, and a Kafka consumer can exit and leave its topic with no reader at all. This is
+	// the only path that depends on none of them, so it is created first and handed to everything
+	// that can arm it.
+	pendingAssemblyRegistry := cache.NewPendingAssemblyRegistry(redisClient)
+
 	// grace period the assembler waits after stream.ended for a client
 	// completion signal before assembling with whatever segments have arrived
 	assemblyGraceSecs, _ := strconv.Atoi(os.Getenv("ASSEMBLY_GRACE_PERIOD_SECS"))
@@ -194,15 +202,10 @@ func main() {
 		assemblyGraceSecs = 90
 	}
 	assemblerUseCase := usecase.NewAssemblerUseCase(
-		storageClient, segmentRegistry, inventoryRegistry, sessionRegistry, publisher,
+		storageClient, segmentRegistry, inventoryRegistry, sessionRegistry, pendingAssemblyRegistry, publisher,
 		time.Duration(assemblyGraceSecs)*time.Second,
 		logger,
 	)
-	// Assembles recordings whose client never called /complete -- a crashed, shut down or
-	// permanently offline exam machine -- so segments already in S3 cannot be stranded as loose
-	// parts with nothing to turn them into a recording.mp4. See usecase.AssemblyWatchdog for why it
-	// fires on upload-session expiry rather than on an inactivity timeout.
-	pendingAssemblyRegistry := cache.NewPendingAssemblyRegistry(redisClient)
 	watchdogIntervalSecs, _ := strconv.Atoi(os.Getenv("ASSEMBLY_WATCHDOG_INTERVAL_SECS"))
 	assemblyWatchdog := watcher.NewAssemblyWatchdog(
 		pendingAssemblyRegistry,
@@ -261,6 +264,7 @@ func main() {
 		examClient,
 		storageClient,
 		segmentRegistry,
+		pendingAssemblyRegistry,
 		hlsFragmentRegistry,
 		liveRewindWindow,
 	)
@@ -436,34 +440,33 @@ func main() {
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
 
-	go func() {
-		if err := frameConverterConsumer.Run(runCtx); err != nil {
-			logger.Error("frame consumer error", zap.Error(err))
-		}
-	}()
+	// Every consumer is launched through here so that one going away can never be quiet about it.
+	//
+	// The previous form logged only when Run returned a non-nil error, and Run returns nil on what it
+	// believes is a shutdown -- so a consumer that exited while the service kept running produced
+	// exactly zero log lines. On 2026-08-17 three of these five exited 16 seconds after startup and
+	// nothing said so; seven hours later an exam recorded normally, published its assembly requests,
+	// and no recording was ever built because those topics had no reader. A consumer stopping while
+	// runCtx is still live is a lost pipeline stage, and it has to read like one.
+	runConsumer := func(name string, consumer *queue.Consumer) {
+		go func() {
+			err := consumer.Run(runCtx)
+			if runCtx.Err() != nil {
+				logger.Info("consumer stopped for shutdown", zap.String("consumer", name))
+				return
+			}
+			logger.Error("CRITICAL: consumer stopped while the service is still running -- its topic now has no reader in this pod and messages will pile up unconsumed",
+				zap.String("consumer", name),
+				zap.Error(err),
+			)
+		}()
+	}
 
-	go func() {
-		if err := streamStartedConsumer.Run(runCtx); err != nil {
-			logger.Error("stream started consumer error", zap.Error(err))
-		}
-	}()
-
-	go func() {
-		if err := streamEndedConsumer.Run(runCtx); err != nil {
-			logger.Error("stream ended consumer error", zap.Error(err))
-		}
-	}()
-
-	go func() {
-		if err := assemblerConsumer.Run(runCtx); err != nil {
-			logger.Error("assembler consumer error", zap.Error(err))
-		}
-	}()
-	go func() {
-		if err := recordingAssemblerConsumer.Run(runCtx); err != nil {
-			logger.Error("recording assembler consumer error", zap.Error(err))
-		}
-	}()
+	runConsumer("frame-converter", frameConverterConsumer)
+	runConsumer("stream-started", streamStartedConsumer)
+	runConsumer("stream-ended", streamEndedConsumer)
+	runConsumer("assembler", assemblerConsumer)
+	runConsumer("recording-assembler", recordingAssemblerConsumer)
 
 	go func() {
 		if err := assemblyWatchdog.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {

@@ -20,14 +20,21 @@ const (
 	watchdogMaxAttempts   = 5
 )
 
-// AssemblyWatchdog assembles recordings whose client never called /complete.
+// AssemblyWatchdog assembles recordings that nothing else claimed -- the Kafka-independent floor
+// under both recording paths.
 //
 // The desktop upload path used to depend entirely on the client asking for assembly, which makes
 // every recording hostage to the exam machine surviving to the end of its own upload: a crash, a
 // shutdown, a force-close or a network that never comes back all leave the segments already in S3
-// as loose parts that nothing will ever turn into a recording.mp4. The WebRTC path never had this
-// problem because stream.ended already carries a grace-period fallback (see
-// AssemblerUseCase.OnStreamEnded); this is the equivalent for uploads.
+// as loose parts that nothing will ever turn into a recording.mp4.
+//
+// This once carried a note that the WebRTC path did not need the same net, because stream.ended
+// already had a grace-period fallback in AssemblerUseCase.OnStreamEnded. That was wrong in two
+// ways, and 2026-08-17 demonstrated both: the fallback only runs if the vox-assembler consumer is
+// alive to receive stream.ended (it had silently exited hours earlier, so four streams published
+// stream.ended into a topic with no reader), and it was an in-process time.AfterFunc that any
+// deploy or restart discards without trace. Both paths now arm an entry here instead, so assembly
+// survives Kafka being down, a consumer being dead, and the process being replaced.
 //
 // Timing is deliberately the upload session's own expiry, not an inactivity timeout. Assembly is
 // effectively one-shot -- AssemblerUseCase.assemble short-circuits on an existing recording.mp4 --
@@ -119,9 +126,19 @@ func (w *AssemblyWatchdog) handle(ctx context.Context, pending cache.PendingAsse
 		return
 	}
 
-	log.Warn("assembling a stream the client never completed",
-		zap.Int("segmentCount", len(metas)),
-	)
+	// Source separates the two reasons a stream can be waiting here, and they do not deserve the
+	// same log level. A WebRTC stream whose grace period elapsed is routine; an upload session that
+	// expired without /complete means an exam machine went silent mid-recording.
+	source := pending.AssemblySource()
+	if source == cache.AssemblySourceWebRTC {
+		log.Info("assembling a webrtc stream whose grace period elapsed",
+			zap.Int("segmentCount", len(metas)),
+		)
+	} else {
+		log.Warn("assembling a stream the client never completed",
+			zap.Int("segmentCount", len(metas)),
+		)
+	}
 
 	eventID, err := uuid.NewV7()
 	if err != nil {
@@ -138,11 +155,11 @@ func (w *AssemblyWatchdog) handle(ctx context.Context, pending cache.PendingAsse
 		StreamType:    pending.StreamType,
 		// Distinct from DESKTOP_SEGMENT_UPLOAD on purpose: downstream needs to be able to tell a
 		// recording the client vouched for from one salvaged after the client went silent.
-		Source:      "SERVER_WATCHDOG",
+		Source:      source,
 		RequestedAt: time.Now().UTC(),
 	})
 	if err == nil {
-		log.Info("assembly watchdog completed a stream the client abandoned")
+		log.Info("assembly watchdog assembled a stream nothing else claimed", zap.String("source", source))
 		w.cancel(ctx, pending.StreamID, log)
 		return
 	}

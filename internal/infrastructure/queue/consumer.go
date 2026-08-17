@@ -3,7 +3,6 @@ package queue
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"time"
 
@@ -119,13 +118,45 @@ func (c *Consumer) SetMonitor(monitor *Monitor) {
 func (c *Consumer) Run(ctx context.Context) error {
 	c.logger.Info("kafka consumer started",
 		zap.String("topic", c.topic),
+		zap.String("groupId", c.groupID),
 	)
-	defer c.logger.Info("kafka consumer stopped", zap.String("topic", c.topic))
+	// Closing the reader is not tidiness, it is what makes a dead consumer visible. The reader owns
+	// background goroutines that keep dialling brokers and logging their own failures, so an
+	// orphaned reader goes on producing "Unable to establish connection to consumer group
+	// coordinator" forever. On 2026-08-17 three consumers had been dead for seven hours while their
+	// orphaned readers kept logging exactly that, which is why the log read like a service still
+	// trying to work rather than one missing half its pipeline.
+	defer func() {
+		if err := c.reader.Close(); err != nil {
+			c.logger.Warn("kafka reader close failed",
+				zap.String("topic", c.topic),
+				zap.String("groupId", c.groupID),
+				zap.Error(err),
+			)
+		}
+	}()
+	defer func() {
+		c.logger.Info("kafka consumer stopped",
+			zap.String("topic", c.topic),
+			zap.String("groupId", c.groupID),
+			// The one fact that separates a clean shutdown from losing a pipeline stage.
+			zap.Bool("shutdown", ctx.Err() != nil),
+		)
+	}()
 
 	for {
 		msg, err := c.reader.FetchMessage(ctx)
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// Whether to stop is a question about OUR context, never about the error value.
+			// FetchMessage wraps kafka-go's dial and read deadlines, and those surface as
+			// context.DeadlineExceeded even though the context passed in here (runCtx in main) has
+			// no deadline at all -- so classifying by the error treated a transient broker timeout
+			// as a shutdown request. That is precisely how exam.recording.assembly.requested,
+			// exam.frame.ready and the vox-assembler group on exam.stream.ended each exited on the
+			// FIRST error of a Kafka restart and stayed dead for the whole life of the pod, while
+			// the two consumers that happened to get a plain dial error rode out the same seven-hour
+			// outage and resumed normally.
+			if ctx.Err() != nil {
 				return nil
 			}
 			c.logger.Error("kafka fetch failed", zap.String("topic", c.topic), zap.Error(err))
@@ -151,7 +182,8 @@ func (c *Consumer) Run(ctx context.Context) error {
 		safeToCommit := c.processMessage(ctx, msg)
 		if safeToCommit || c.commitOnDLQFailure {
 			if err := c.reader.CommitMessages(ctx, msg); err != nil {
-				if errors.Is(err, context.Canceled) {
+				// Same rule as the fetch path above: only our own context ending means stop.
+				if ctx.Err() != nil {
 					return nil
 				}
 				c.logger.Error("kafka commit failed",

@@ -111,6 +111,37 @@ func TestWatchdog_AssemblesStreamTheClientNeverCompleted(t *testing.T) {
 	}
 }
 
+// A WebRTC stream parked here by OnStreamEnded is waiting out its grace period, not being salvaged
+// from a client that went silent. The Source has to survive the round trip through Redis, because it
+// is what downstream reads to tell "this ended normally" from "we rescued what was left".
+func TestWatchdog_CarriesWebRTCSourceThroughToAssembly(t *testing.T) {
+	f := newWatchdogFixture(t)
+	f.addSegment(t, "stream-1", 0)
+	if err := f.pending.Schedule(context.Background(), cache.PendingAssembly{
+		StreamID:      "stream-1",
+		ScheduleID:    "schedule-1",
+		SessionID:     "session-1",
+		ParticipantID: "candidate-1",
+		StreamType:    "camera",
+		DueAt:         time.Now().UTC().Add(-time.Minute),
+		Source:        cache.AssemblySourceWebRTC,
+	}); err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+
+	f.watchdog.SweepOnce(context.Background())
+
+	if len(f.assembler.calls) != 1 {
+		t.Fatalf("got %d assemble calls, want 1", len(f.assembler.calls))
+	}
+	if got := f.assembler.calls[0].Source; got != cache.AssemblySourceWebRTC {
+		t.Fatalf("got Source=%q, want %q", got, cache.AssemblySourceWebRTC)
+	}
+	if len(f.stillPending(t)) != 0 {
+		t.Fatal("a successfully assembled stream should no longer be pending")
+	}
+}
+
 // Firing early is the one thing the watchdog must never do: assembly short-circuits on an existing
 // recording.mp4, so an early run permanently prevents the complete one.
 func TestWatchdog_LeavesStreamsThatAreNotDueYet(t *testing.T) {

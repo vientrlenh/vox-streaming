@@ -37,6 +37,9 @@ type Handler struct {
 	upgrader  websocket.Upgrader
 	storage *storage.Client
 	segments *cache.SegmentRegistry
+	// Armed the moment a peer is accepted, so a WebRTC recording gets assembled even if nothing ever
+	// processes its stream.ended -- see the arming site in Signal for what that protects against.
+	pendingAssembly *cache.PendingAssemblyRegistry
 	hlsFragments *cache.HLSFragmentRegistry
 	liveRewindWindow time.Duration
 	logger    *zap.Logger
@@ -100,6 +103,7 @@ func NewHandler(
 	examClient *grpcclient.ExamClient,
 	storage *storage.Client,
 	segments *cache.SegmentRegistry,
+	pendingAssembly *cache.PendingAssemblyRegistry,
 	hlsFragments *cache.HLSFragmentRegistry,
 	liveRewindWindow time.Duration,
 ) *Handler {
@@ -110,6 +114,7 @@ func NewHandler(
 		monitorUseCase: monitorUseCase,
 		storage: storage,
 		segments: segments,
+		pendingAssembly: pendingAssembly,
 		hlsFragments: hlsFragments,
 		liveRewindWindow: liveRewindWindow,
 		upgrader: websocket.Upgrader{
@@ -159,6 +164,31 @@ func NewHandler(
 		broadcaster: broadcaster,
 		examClient: examClient,
 	}
+}
+
+// How long after media can last arrive before the watchdog may assemble a WebRTC stream. Matches the
+// upload path's 30m credential grace + 2m watchdog grace (see handler/segment) so the two recording
+// sources are not salvaged on different schedules for no reason.
+const webrtcAssemblyGrace = 32 * time.Minute
+
+// webrtcAssemblyDueAt is the earliest moment this stream provably cannot grow any further, and
+// therefore the earliest it is safe to let the watchdog assemble it. Assembly is effectively
+// one-shot -- AssemblerUseCase.assemble short-circuits on an existing recording.mp4 -- so a due time
+// that lands mid-exam does not merely produce a short recording, it permanently prevents the complete
+// one from ever being built. Erring late costs a delayed recording; erring early destroys one.
+//
+// The token's own exp is not the answer by itself: it is how often permission gets re-checked, not
+// how long the exam runs. Anchoring on time.Now() first means an already-stale token cannot produce a
+// due time in the past and fire the watchdog on a stream that is still live.
+func webrtcAssemblyDueAt(claims *auth.StreamClaims) time.Time {
+	windowEnd := time.Now().UTC()
+	if claims.ExpiresAt != nil && claims.ExpiresAt.Time.UTC().After(windowEnd) {
+		windowEnd = claims.ExpiresAt.Time.UTC()
+	}
+	if scheduleEnd, ok := claims.ScheduleEnd(); ok && scheduleEnd.After(windowEnd) {
+		windowEnd = scheduleEnd
+	}
+	return windowEnd.Add(webrtcAssemblyGrace)
 }
 
 func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
@@ -215,6 +245,32 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 			"message": "server error",
 		})
 		return
+	}
+
+	// Arm the assembly watchdog before a single byte of media arrives.
+	//
+	// The normal trigger is stream.ended -> AssemblerUseCase.OnStreamEnded, but that trigger only
+	// exists while the vox-assembler consumer is alive to receive it. On 2026-08-17 that consumer had
+	// silently exited hours earlier; four streams published stream.ended into a topic with no reader
+	// and nothing ever turned their segments into a recording. This entry depends on neither Kafka nor
+	// this process surviving, and OnStreamEnded disarms it once a recording actually exists.
+	//
+	// Logged rather than fatal: refusing the connection would trade a rare unassembled recording for a
+	// certain missing one.
+	if err := h.pendingAssembly.Schedule(r.Context(), cache.PendingAssembly{
+		StreamID:      peer.streamID,
+		ScheduleID:    scheduleID,
+		SessionID:     claims.SessionID,
+		ParticipantID: participantID,
+		StreamType:    streamType,
+		DueAt:         webrtcAssemblyDueAt(claims),
+		Source:        cache.AssemblySourceWebRTC,
+	}); err != nil {
+		h.logger.Error("arm assembly watchdog failed; this webrtc stream will only be assembled if stream.ended is processed",
+			zap.String("streamId", peer.streamID),
+			zap.String("scheduleId", scheduleID),
+			zap.Error(err),
+		)
 	}
 
 	if old := h.sessions.Replace(scheduleID, participantID, streamType, peer); old != nil {

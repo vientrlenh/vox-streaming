@@ -28,16 +28,19 @@ import (
 )
 
 type AssemblerUseCase struct {
-	storage     *storage.Client
-	segments    *cache.SegmentRegistry
-	inventory   *cache.InventoryRegistry
-	sessions    *cache.SessionRegistry
-	publisher   domain.EventPublisher
-	gracePeriod time.Duration
-	logger      *zap.Logger
-	workDir     string
-	sem         chan struct{}
-	inFlight    sync.Map // streamID -> struct{}, guards against completion+timeout racing on the same jobDir
+	storage   *storage.Client
+	segments  *cache.SegmentRegistry
+	inventory *cache.InventoryRegistry
+	sessions  *cache.SessionRegistry
+	// Where the grace period is served out. Required, not optional: it is the only reason a WebRTC
+	// recording survives this process being restarted or this consumer being dead.
+	pendingAssembly *cache.PendingAssemblyRegistry
+	publisher       domain.EventPublisher
+	gracePeriod     time.Duration
+	logger          *zap.Logger
+	workDir         string
+	sem             chan struct{}
+	inFlight        sync.Map // streamID -> struct{}, guards against completion+timeout racing on the same jobDir
 }
 
 var errRecordingStatePublish = errors.New("publish recording state")
@@ -51,6 +54,7 @@ func NewAssemblerUseCase(
 	segments *cache.SegmentRegistry,
 	inventory *cache.InventoryRegistry,
 	sessions *cache.SessionRegistry,
+	pendingAssembly *cache.PendingAssemblyRegistry,
 	publisher domain.EventPublisher,
 	gracePeriod time.Duration,
 	logger *zap.Logger,
@@ -61,15 +65,16 @@ func NewAssemblerUseCase(
 	}
 	maxConcurrent := 3
 	return &AssemblerUseCase{
-		storage:     storage,
-		segments:    segments,
-		inventory:   inventory,
-		sessions:    sessions,
-		publisher:   publisher,
-		gracePeriod: gracePeriod,
-		logger:      logger,
-		workDir:     workDir,
-		sem:         make(chan struct{}, maxConcurrent),
+		storage:         storage,
+		segments:        segments,
+		inventory:       inventory,
+		sessions:        sessions,
+		pendingAssembly: pendingAssembly,
+		publisher:       publisher,
+		gracePeriod:     gracePeriod,
+		logger:          logger,
+		workDir:         workDir,
+		sem:             make(chan struct{}, maxConcurrent),
 	}
 }
 
@@ -84,18 +89,44 @@ func (u *AssemblerUseCase) OnStreamEnded(ctx context.Context, event domain.Strea
 		return err // infra error - let Kafka retry
 	}
 	if complete {
-		return u.AssembleRequested(ctx, recordingRequestFromStreamEnded(event))
+		if err := u.AssembleRequested(ctx, recordingRequestFromStreamEnded(event)); err != nil {
+			return err
+		}
+		// Disarm only after the recording exists. Doing it earlier would open a window in which
+		// neither this call nor the watchdog owns the stream; doing it late is harmless because
+		// assemble short-circuits on a recording that is already there.
+		u.disarmWatchdog(ctx, event.StreamID)
+		return nil
 	}
 
-	time.AfterFunc(u.gracePeriod, func() {
-		if err := u.AssembleRequested(context.Background(), recordingRequestFromStreamEnded(event)); err != nil {
-			u.logger.Error("fallback assembly failed",
-				zap.String("streamId", event.StreamID),
-				zap.Error(err),
-			)
-		}
-	})
+	// Not every segment has landed yet, so wait out the grace period -- but wait for it in Redis
+	// rather than in a time.AfterFunc. An in-process timer is discarded by every deploy, restart and
+	// crash, silently stranding whichever recordings were mid-grace at that moment, and it also does
+	// nothing at all if this consumer is not the one that ends up alive. Handing the deadline to the
+	// watchdog's due-set makes the wait survive all three.
+	if err := u.pendingAssembly.Schedule(ctx, cache.PendingAssembly{
+		StreamID:      event.StreamID,
+		ScheduleID:    event.ScheduleID,
+		SessionID:     event.SessionID,
+		ParticipantID: event.ParticipantID,
+		StreamType:    event.StreamType,
+		DueAt:         time.Now().UTC().Add(u.gracePeriod),
+		Source:        cache.AssemblySourceWebRTC,
+	}); err != nil {
+		// Returned, not swallowed: Kafka retrying this message is exactly the right recovery, and
+		// the entry armed when the peer connected is still in place as the outer floor.
+		return fmt.Errorf("schedule grace-period assembly for %s: %w", event.StreamID, err)
+	}
 	return nil
+}
+
+func (u *AssemblerUseCase) disarmWatchdog(ctx context.Context, streamID string) {
+	if err := u.pendingAssembly.Cancel(ctx, streamID); err != nil {
+		u.logger.Warn("disarm assembly watchdog failed; it may assemble this stream again later, which is idempotent",
+			zap.String("streamId", streamID),
+			zap.Error(err),
+		)
+	}
 }
 
 func (u *AssemblerUseCase) Assemble(ctx context.Context, scheduleID, sessionID, streamID string) error {

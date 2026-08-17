@@ -16,9 +16,10 @@ import (
 // from is gone too.
 const pendingAssemblyTTL = segmentTTL
 
-// PendingAssembly is a stream that has been opened for segment upload but not yet finished by the
-// client calling /complete. It carries its own copy of the identifiers the assembler needs, because
-// by the time it comes due the upload session itself no longer exists to look them up from.
+// PendingAssembly is a stream that still owes a recording: opened for segment upload and not yet
+// finished by the client calling /complete, or a WebRTC stream whose stream.ended has not yet been
+// turned into a recording. It carries its own copy of the identifiers the assembler needs, because
+// by the time it comes due neither the upload session nor the peer exists to look them up from.
 type PendingAssembly struct {
 	StreamID      string    `json:"streamId"`
 	ScheduleID    string    `json:"scheduleId"`
@@ -27,7 +28,32 @@ type PendingAssembly struct {
 	StreamType    string    `json:"streamType"`
 	DueAt         time.Time `json:"dueAt"`
 	Attempts      int       `json:"attempts"`
+	// Which pipeline owes this recording, so the watchdog can label what it produces and log it
+	// honestly. A WebRTC stream reaching its grace period is the NORMAL end of that path; an upload
+	// session expiring with no /complete is a salvage after the exam machine went silent. Reporting
+	// both as the latter would train operators to ignore the alarming one.
+	//
+	// Empty on entries written before this field existed, and those are all from the upload path --
+	// see AssemblySource.
+	Source string `json:"source,omitempty"`
 }
+
+// AssemblySource is the Source to act on, defaulting entries that predate the field.
+func (p PendingAssembly) AssemblySource() string {
+	if p.Source == "" {
+		return AssemblySourceWatchdog
+	}
+	return p.Source
+}
+
+const (
+	// Salvaged after the client went silent: nobody vouched for this recording being whole.
+	AssemblySourceWatchdog = "SERVER_WATCHDOG"
+	// The ordinary end of a WebRTC stream, assembled once its grace period elapsed. Matches the
+	// Source that AssemblerUseCase.OnStreamEnded uses on the immediate path, so downstream cannot
+	// tell whether the grace period was waited out in-process or in Redis -- which is the point.
+	AssemblySourceWebRTC = "SERVER_WEBRTC"
+)
 
 // PendingAssemblyRegistry is the durable side of the assembly watchdog: a due-time-ordered set of
 // streams that still owe a recording, so a recording gets assembled even when the client never
