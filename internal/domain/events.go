@@ -139,11 +139,11 @@ func DefaultAlertLevel(alertType string) AlertLevel {
 	case AlertPhoneDetected, AlertMultiplePersons, AlertProhibitedObject:
 		return AlertLevelCritical
 	case AlertPersonMissing, AlertWindowFocusLost, AlertUncooperativeCandidate,
-		AlertStreamDropped, AlertTrackEnded, AlertReconnectLoop, AlertRecordingIncomplete:
+		AlertCameraSignalLost, AlertStreamDropped, AlertRecordingIncomplete:
 		return AlertLevelWarning
 	// Ghi rõ ra dù nhánh default cũng trả INFO: đây là một lựa chọn, không phải một giá trị rơi
 	// vãi. "Không nhận ra loại này" và "loại này chỉ đáng ghi vào sổ" phải phân biệt được ở đây.
-	case AlertRecordingTruncated:
+	case AlertRecordingTruncated, AlertCameraSignalRestored:
 		return AlertLevelInfo
 	default:
 		return AlertLevelInfo
@@ -196,6 +196,25 @@ const (
 	// nen moi canh bao toi day la mot lan roi di that; nhieu lan don dap moi dang nghi.
 	AlertWindowFocusLost = "WINDOW_FOCUS_LOST"
 
+	// Camera ngừng gửi khung hình giữa buổi thi (WPF CameraSignalGuard -> WS -> Python push_alert).
+	//
+	// Phát hiện nằm ở MÁY TRẠM chứ không ở đây, và đó là điều kiện để cảnh báo này có nghĩa:
+	// vox-streaming chỉ thấy "không có media" nên không phân biệt nổi camera bị rút với đường
+	// truyền của học viên chết. Máy trạm thì thấy khung hình đứng lại trong khi tiến trình vẫn
+	// khoẻ. Đó là hai lời buộc tội khác hẳn nhau, và gộp chúng lại là bất công với học viên đang
+	// ngồi trên mạng kém.
+	//
+	// WARNING chứ không CRITICAL: trong những giây đầu, sự cố phần cứng và phá hoại cố ý là không
+	// phân biệt được. Giám thị cần nhìn, nhưng không ai nên bị dừng bài vì một sợi cáp USB.
+	AlertCameraSignalLost = "CAMERA_SIGNAL_LOST"
+
+	// Khung hình trở lại sau một lần mất ĐÃ được cảnh báo. Tồn tại để đóng KHOẢNG, không phải để
+	// báo tin vui: thiếu nó thì sổ bằng chứng chỉ có điểm bắt đầu, và với người chấm thì "mất
+	// camera lúc 10:32" kéo dài hai mươi giây hay kéo dài hết bài thi là hai kết luận khác hẳn.
+	//
+	// INFO vì lúc nó phát ra thì sự cố đã qua -- không còn gì để giám thị can thiệp.
+	AlertCameraSignalRestored = "CAMERA_SIGNAL_RESTORED"
+
 	// Exam flow detect alerts -- do đồ thị hội thoại phía AI kết luận, không suy ra từ video.
 	//
 	// Thí sinh đã được nhắc một lần vì câu trả lời thiếu hợp tác, tới lần thứ hai thì AI bỏ qua câu
@@ -217,9 +236,13 @@ const (
 	AlertRecordingTruncated = "RECORDING_TRUNCATED"
 
 	// Streaming service detect alerts
+	//
+	// TRACK_ENDED và RECONNECT_LOOP bỏ đi: chúng nằm trong bảng mức và trong test như thể đang
+	// hoạt động, nhưng KHÔNG nơi nào trong hệ phát chúng. Một hằng số không ai bắn là lời hứa mà
+	// từ vựng không giữ -- nó khiến người đọc tin rằng "track kết thúc" đã được canh, trong khi
+	// thứ duy nhất thực sự canh được là STREAM_DROPPED (peer connection hỏng hoặc hết grace 30s).
+	// Muốn có chúng thật thì phải viết phần phát hiện trước, rồi mới thêm tên lại.
 	AlertStreamDropped       = "STREAM_DROPPED"
-	AlertTrackEnded          = "TRACK_ENDED"
-	AlertReconnectLoop       = "RECONNECT_LOOP"
 	AlertRecordingIncomplete = "RECORDING_INCOMPLETE"
 )
 
