@@ -40,6 +40,9 @@ type Handler struct {
 	// Armed the moment a peer is accepted, so a WebRTC recording gets assembled even if nothing ever
 	// processes its stream.ended -- see the arming site in Signal for what that protects against.
 	pendingAssembly *cache.PendingAssemblyRegistry
+	// Every stream this schedule has had, alive or finished -- the live session registry only knows
+	// the former. See GetScheduleStreams.
+	scheduleStreams *cache.ScheduleStreamRegistry
 	hlsFragments *cache.HLSFragmentRegistry
 	liveRewindWindow time.Duration
 	logger    *zap.Logger
@@ -104,6 +107,7 @@ func NewHandler(
 	storage *storage.Client,
 	segments *cache.SegmentRegistry,
 	pendingAssembly *cache.PendingAssemblyRegistry,
+	scheduleStreams *cache.ScheduleStreamRegistry,
 	hlsFragments *cache.HLSFragmentRegistry,
 	liveRewindWindow time.Duration,
 ) *Handler {
@@ -115,6 +119,7 @@ func NewHandler(
 		storage: storage,
 		segments: segments,
 		pendingAssembly: pendingAssembly,
+		scheduleStreams: scheduleStreams,
 		hlsFragments: hlsFragments,
 		liveRewindWindow: liveRewindWindow,
 		upgrader: websocket.Upgrader{
@@ -257,6 +262,24 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 	//
 	// Logged rather than fatal: refusing the connection would trade a rare unassembled recording for a
 	// certain missing one.
+	// Record the stream under its schedule before any media arrives, so a stream that dies in its
+	// first seconds is still findable afterwards -- that is precisely the one a proctor goes looking
+	// for. Logged rather than fatal for the same reason as the watchdog arm below.
+	if err := h.scheduleStreams.Record(r.Context(), cache.ScheduleStream{
+		StreamID:      peer.streamID,
+		ScheduleID:    scheduleID,
+		SessionID:     claims.SessionID,
+		ParticipantID: participantID,
+		StreamType:    streamType,
+		StartedAt:     peer.startedAt,
+	}); err != nil {
+		h.logger.Error("record schedule stream failed; this stream will vanish from the room after a reload",
+			zap.String("streamId", peer.streamID),
+			zap.String("scheduleId", scheduleID),
+			zap.Error(err),
+		)
+	}
+
 	if err := h.pendingAssembly.Schedule(r.Context(), cache.PendingAssembly{
 		StreamID:      peer.streamID,
 		ScheduleID:    scheduleID,
@@ -285,6 +308,15 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		h.sessions.RemoveIfSame(scheduleID, participantID, streamType, peer)
 		peer.Close()
+		// Stamped here rather than inside Peer.close so the peer stays unaware of the index. A fresh
+		// context because r.Context() is already cancelled by the time this defer runs -- the request
+		// is over, which is exactly what this line is recording.
+		if err := h.scheduleStreams.MarkEnded(context.Background(), scheduleID, peer.streamID, time.Now().UTC()); err != nil {
+			h.logger.Warn("mark schedule stream ended failed",
+				zap.String("streamId", peer.streamID),
+				zap.Error(err),
+			)
+		}
 	}()
 
 	peer.pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -489,6 +521,60 @@ func (h *Handler) GetActiveSchedules(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(schedules)
 }
 
+// scheduleStreamResponse mirrors the monitor snapshot's stream shape, plus the one field the
+// snapshot cannot carry: when the stream stopped. Field names match so the client can feed both into
+// the same reducer.
+type scheduleStreamResponse struct {
+	StreamID      string  `json:"streamId"`
+	StreamType    string  `json:"streamType"`
+	ParticipantID string  `json:"participantId"`
+	SessionID     string  `json:"sessionId"`
+	StartedAt     string  `json:"startedAt"`
+	EndedAt       *string `json:"endedAt,omitempty"`
+}
+
+// GetScheduleStreams lists every stream this schedule has had, finished ones included.
+//
+// The websocket snapshot answers "who is on air right now", which is what the live grid needs and
+// the wrong answer for a proctor who just reloaded the page: every student who had already dropped
+// disappears from the room, and with them the way to reach footage that is still retained. This is
+// the durable counterpart, read once on mount to seed the grid before the socket takes over.
+//
+// Bounded by the index's own retention, which mirrors the fragments' -- so a stream listed here can
+// always be played, and one whose footage has expired is not offered in the first place.
+func (h *Handler) GetScheduleStreams(w http.ResponseWriter, r *http.Request) {
+	scheduleID := r.PathValue("scheduleId")
+	if !h.authorizeMonitor(w, r, scheduleID) {
+		return
+	}
+
+	streams, err := h.scheduleStreams.List(r.Context(), scheduleID)
+	if err != nil {
+		h.logger.Error("list schedule streams failed", zap.String("scheduleId", scheduleID), zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	response := make([]scheduleStreamResponse, 0, len(streams))
+	for _, stream := range streams {
+		item := scheduleStreamResponse{
+			StreamID:      stream.StreamID,
+			StreamType:    stream.StreamType,
+			ParticipantID: stream.ParticipantID,
+			SessionID:     stream.SessionID,
+			StartedAt:     stream.StartedAt.UTC().Format(time.RFC3339Nano),
+		}
+		if stream.EndedAt != nil {
+			endedAt := stream.EndedAt.UTC().Format(time.RFC3339Nano)
+			item.EndedAt = &endedAt
+		}
+		response = append(response, item)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
 // authorizeMonitor validates a monitor token off the query string and checks it
 // covers scheduleID, writing the error response itself and reporting whether the
 // caller may proceed. Shared by both live-rewind endpoints so they can never
@@ -525,16 +611,21 @@ func (h *Handler) GetLiveManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Not being live is a MODE, not a refusal.
+	//
+	// This used to 404 the moment the peer closed, which threw away the whole point of retaining
+	// fragments: a student disconnects, the proctor goes to look at what just happened, and the
+	// playlist reports "stream is not live" while every fragment of the footage is still sitting in
+	// Redis for another day. Note that GetLiveAsset below never had this gate, so the fragments were
+	// already being served -- only the one file that indexes them refused. Removing it widens
+	// nothing: authorizeMonitor above is the actual access check.
 	info, err := h.monitorUseCase.FindLiveStream(r.Context(), scheduleID, streamID)
 	if err != nil {
 		h.logger.Error("find live stream failed", zap.String("scheduleId", scheduleID), zap.String("streamId", streamID), zap.Error(err))
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if info == nil {
-		http.Error(w, "stream is not live", http.StatusNotFound)
-		return
-	}
+	ended := info == nil
 
 	inits, err := h.hlsFragments.ListInits(r.Context(), streamID)
 	if err != nil {
@@ -561,9 +652,16 @@ func (h *Handler) GetLiveManifest(w http.ResponseWriter, r *http.Request) {
 		return name + "?sig=" + sig
 	}
 
-	manifest, err := buildLiveManifest(inits, frags, h.liveRewindWindow, assetURI)
+	manifest, err := buildLiveManifest(inits, frags, h.liveRewindWindow, ended, assetURI)
 	if err != nil {
-		h.logger.Warn("build live manifest failed, no fragments ready yet", zap.String("streamId", streamID), zap.Error(err))
+		// The only way here is "no fragments", which now covers two different situations that deserve
+		// the same 404 but not the same reading: a live stream whose first fragment has not landed
+		// yet, and a finished stream whose retention window has passed.
+		h.logger.Warn("build live manifest failed",
+			zap.String("streamId", streamID),
+			zap.Bool("ended", ended),
+			zap.Error(err),
+		)
 		http.Error(w, "live rewind not ready yet", http.StatusNotFound)
 		return
 	}

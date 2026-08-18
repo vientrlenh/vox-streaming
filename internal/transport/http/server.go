@@ -12,6 +12,9 @@ func Register(mux *http.ServeMux, webrtcHandler *webrtc.Handler, segmentHandler 
 	mux.HandleFunc("/ws/stream", webrtcHandler.ServeStream)
 	mux.HandleFunc("/ws/monitor", webrtcHandler.ServeMonitor)
 	mux.HandleFunc("/schedules/active", webrtcHandler.GetActiveSchedules)
+	// Streams a schedule has HAD, not just the ones still connected — what a proctor's grid needs to
+	// rebuild itself after a reload. See webrtc.Handler.GetScheduleStreams.
+	mux.HandleFunc("GET /schedules/{scheduleId}/streams", webrtcHandler.GetScheduleStreams)
 	// The literal "playlist.m3u8" segment is more specific than the {asset}
 	// wildcard below, so ServeMux routes the manifest to its own handler even
 	// though both patterns match it (Go 1.22+ precedence rules).

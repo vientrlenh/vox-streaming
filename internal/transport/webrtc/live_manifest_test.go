@@ -25,7 +25,7 @@ func assetURIEcho(name string) string {
 }
 
 func TestBuildLiveManifest_NoFragments(t *testing.T) {
-	_, err := buildLiveManifest(nil, nil, time.Minute, assetURIEcho)
+	_, err := buildLiveManifest(nil, nil, time.Minute, false, assetURIEcho)
 	if err == nil {
 		t.Fatal("expected error when no fragments are available yet")
 	}
@@ -39,7 +39,7 @@ func TestBuildLiveManifest_Basic(t *testing.T) {
 		hlsFrag(6, 1, base.Add(4*time.Second), 4*time.Second),
 	}
 
-	manifest, err := buildLiveManifest(inits, frags, time.Hour, assetURIEcho)
+	manifest, err := buildLiveManifest(inits, frags, time.Hour, false, assetURIEcho)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -67,6 +67,47 @@ func TestBuildLiveManifest_Basic(t *testing.T) {
 	}
 }
 
+// A live playlist must never carry #EXT-X-ENDLIST: the player would stop reloading it and the
+// stream would appear to freeze at whatever fragment happened to be last.
+func TestBuildLiveManifest_LivePlaylistHasNoEndList(t *testing.T) {
+	base := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	inits := []cache.HLSInitMeta{{Epoch: 1, S3Key: "init-1"}}
+	frags := []cache.HLSFragmentMeta{hlsFrag(0, 1, base, 4*time.Second)}
+
+	manifest, err := buildLiveManifest(inits, frags, time.Hour, false, assetURIEcho)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(manifest, "#EXT-X-ENDLIST") {
+		t.Errorf("a live playlist must stay open, got: %q", manifest)
+	}
+}
+
+// And a finished stream must carry it. Without ENDLIST the player keeps treating the playlist as
+// live: it polls forever for fragments that will never arrive and parks the playhead behind a live
+// edge that no longer moves, so the seek bar can never fill and the behind-live warning never clears.
+func TestBuildLiveManifest_EndedPlaylistClosesWithEndList(t *testing.T) {
+	base := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	inits := []cache.HLSInitMeta{{Epoch: 1, S3Key: "init-1"}}
+	frags := []cache.HLSFragmentMeta{
+		hlsFrag(0, 1, base, 4*time.Second),
+		hlsFrag(1, 1, base.Add(4*time.Second), 4*time.Second),
+	}
+
+	manifest, err := buildLiveManifest(inits, frags, time.Hour, true, assetURIEcho)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.HasSuffix(manifest, "#EXT-X-ENDLIST\n") {
+		t.Errorf("ended playlist must close with #EXT-X-ENDLIST, got: %q", manifest)
+	}
+	// Everything else stays identical -- ENDLIST changes how the playlist is consumed, not what it
+	// lists, and a replay that dropped fragments would be worse than no replay at all.
+	if strings.Count(manifest, "#EXTINF:") != 2 {
+		t.Errorf("expected both fragments to survive, got: %q", manifest)
+	}
+}
+
 // The whole point of the absolute anchor: a client attaching at any moment can
 // map media time back to wall-clock time, so tearing the player down and
 // re-attaching does not re-base the timeline.
@@ -78,7 +119,7 @@ func TestBuildLiveManifest_ProgramDateTimeAnchorsFirstFragment(t *testing.T) {
 		hlsFrag(1, 1, base.Add(4*time.Second), 4*time.Second),
 	}
 
-	manifest, err := buildLiveManifest(inits, frags, time.Hour, assetURIEcho)
+	manifest, err := buildLiveManifest(inits, frags, time.Hour, false, assetURIEcho)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -103,7 +144,7 @@ func TestBuildLiveManifest_ProgramDateTimeFollowsWindow(t *testing.T) {
 		frags = append(frags, hlsFrag(i, 1, base.Add(time.Duration(i)*time.Minute), time.Minute))
 	}
 
-	manifest, err := buildLiveManifest(inits, frags, 3*time.Minute, assetURIEcho)
+	manifest, err := buildLiveManifest(inits, frags, 3*time.Minute, false, assetURIEcho)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -123,7 +164,7 @@ func TestBuildLiveManifest_Windowing(t *testing.T) {
 		frags = append(frags, hlsFrag(i, 1, base.Add(time.Duration(i)*time.Minute), time.Minute))
 	}
 
-	manifest, err := buildLiveManifest(inits, frags, 3*time.Minute, assetURIEcho)
+	manifest, err := buildLiveManifest(inits, frags, 3*time.Minute, false, assetURIEcho)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -148,7 +189,7 @@ func TestBuildLiveManifest_ZeroWindowKeepsEverything(t *testing.T) {
 		frags = append(frags, hlsFrag(i, 1, base.Add(time.Duration(i)*time.Minute), time.Minute))
 	}
 
-	manifest, err := buildLiveManifest(inits, frags, 0, assetURIEcho)
+	manifest, err := buildLiveManifest(inits, frags, 0, false, assetURIEcho)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -177,7 +218,7 @@ func TestBuildLiveManifest_DiscontinuityOnEpochChange(t *testing.T) {
 		hlsFrag(2, 2, base.Add(20*time.Second), 4*time.Second),
 	}
 
-	manifest, err := buildLiveManifest(inits, frags, time.Hour, assetURIEcho)
+	manifest, err := buildLiveManifest(inits, frags, time.Hour, false, assetURIEcho)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -217,7 +258,7 @@ func TestBuildLiveManifest_DiscontinuitySequenceCountsTrimmed(t *testing.T) {
 	}
 
 	// 1-minute window keeps only seq 3, trimming the epoch 1 -> 2 boundary away.
-	manifest, err := buildLiveManifest(inits, frags, time.Minute, assetURIEcho)
+	manifest, err := buildLiveManifest(inits, frags, time.Minute, false, assetURIEcho)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -230,7 +271,7 @@ func TestBuildLiveManifest_MissingInitForEpoch(t *testing.T) {
 	base := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
 	frags := []cache.HLSFragmentMeta{hlsFrag(0, 1, base, 4*time.Second)}
 
-	_, err := buildLiveManifest(nil, frags, time.Hour, assetURIEcho)
+	_, err := buildLiveManifest(nil, frags, time.Hour, false, assetURIEcho)
 	if err == nil {
 		t.Fatal("expected error when no init segment is registered for the fragment's epoch")
 	}

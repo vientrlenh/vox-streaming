@@ -44,7 +44,16 @@ const programDateTimeLayout = "2006-01-02T15:04:05.000Z07:00"
 // playlist, not EVENT/VOD) and computes #EXT-X-MEDIA-SEQUENCE from the first
 // windowed fragment's Seq (not always 0) — getting either wrong is a classic
 // way to make hls.js think fragments were skipped across manifest refreshes.
-func buildLiveManifest(inits []cache.HLSInitMeta, frags []cache.HLSFragmentMeta, window time.Duration, assetURI func(name string) string) (string, error) {
+//
+// `ended` closes the playlist with #EXT-X-ENDLIST, and that tag is what makes
+// replaying a finished stream work at all rather than merely look odd. Without
+// it a player keeps treating the playlist as live: it reloads it forever waiting
+// for fragments that will never come, and it parks the playhead a fixed distance
+// behind a "live edge" that no longer advances — so the seek bar can never fill,
+// the client's behind-live warning fires permanently, and jump-to-live seeks into
+// nothing. With it the player switches to VOD behaviour: seek anywhere, no
+// reload polling, no live-edge arithmetic.
+func buildLiveManifest(inits []cache.HLSInitMeta, frags []cache.HLSFragmentMeta, window time.Duration, ended bool, assetURI func(name string) string) (string, error) {
 	if len(frags) == 0 {
 		return "", fmt.Errorf("no hls fragments available yet")
 	}
@@ -96,6 +105,10 @@ func buildLiveManifest(inits []cache.HLSInitMeta, frags []cache.HLSFragmentMeta,
 		}
 
 		fmt.Fprintf(&b, "#EXTINF:%.6f,\n%s\n", f.EndedAt.Sub(f.StartedAt).Seconds(), assetURI(hlsFragmentAssetName(f.Seq)))
+	}
+
+	if ended {
+		b.WriteString("#EXT-X-ENDLIST\n")
 	}
 
 	return b.String(), nil

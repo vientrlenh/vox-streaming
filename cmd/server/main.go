@@ -220,6 +220,8 @@ func main() {
 
 	ffmpegIngestOpts := buildFFmpegIngestOptions(logger)
 	hlsFragmentRegistry := cache.NewHLSFragmentRegistry(redisClient)
+	// Same retention as the fragments above, on purpose — see cache.scheduleStreamTTL.
+	scheduleStreamRegistry := cache.NewScheduleStreamRegistry(redisClient)
 	// 0 is a meaningful value here — "no trailing window, serve the DVR from the
 	// stream's start" — so it must be distinguishable from the variable being
 	// unset, which still falls back to a 15-minute tail.
@@ -265,6 +267,7 @@ func main() {
 		storageClient,
 		segmentRegistry,
 		pendingAssemblyRegistry,
+		scheduleStreamRegistry,
 		hlsFragmentRegistry,
 		liveRewindWindow,
 	)
