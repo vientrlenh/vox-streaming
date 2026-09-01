@@ -127,6 +127,14 @@ type Peer struct {
 	disconnectTimer *time.Timer
 	disconnectMu    sync.Mutex
 
+	// Signaling channel, deliberately SWAPPABLE rather than owned by the connection that created
+	// this peer. A student's WebSocket and their ICE transport fail independently, and the peer's
+	// life belongs to the media, not to the control socket -- see BindSignaling.
+	signalMu    sync.Mutex
+	signalConn  *safeConn
+	signalGen   uint64 // bumped on every bind, so a stale connection cannot release a newer one
+	signalTimer *time.Timer
+
 	streamUseCase *usecase.StreamUseCase
 	monitorUseCase *usecase.MonitorUseCase
 	storage *storage.Client
@@ -722,6 +730,118 @@ func (p *Peer) cancelDisconnectTimer() {
 	}
 }
 
+// How long a peer survives with no signaling socket attached before it is closed.
+//
+// This is a BACKSTOP against leaking a peer whose client vanished without ICE ever noticing --
+// there is no media-inactivity watchdog on track.Read, so a half-open path can otherwise sit in
+// PeerConnectionStateConnected for the rest of the exam holding an ffmpeg recorder slot.
+//
+// Sized against the ladder that can actually reach this peer, which is a shorter one than it looks.
+// Only a RESUME re-attaches to an existing stream, and MonitorStreamClient's resume ladder is
+// SignalingResumeAttempts = 1+2+4, about 7 seconds. Its longer rebuild ladder is irrelevant here: a
+// rebuild constructs a fresh client-side Session whose StreamId is null, so it dials without
+// ?resumeStreamId= and lands on a brand new peer rather than this one.
+//
+// 90s is therefore deliberate headroom over that ~7s, not a close fit to it. What the headroom buys
+// is the case the ladder does not cover: a machine briefly suspended mid-exam -- a closed lid, an OS
+// sleep -- where the client is not retrying at all for a while and then resumes as if nothing
+// happened.
+//
+// Note this grace is deliberately NOT the ICE one: losing the control socket and losing the media
+// path are independent failures with independent recoveries, and sharing a timer would let either
+// reset the other's window.
+const signalingGrace = 90 * time.Second
+
+// BindSignaling attaches conn as this peer's signaling channel and cancels any pending
+// signaling-loss close, returning a generation token for ReleaseSignaling.
+//
+// Returns ok=false if the peer is already closed, which is what makes adoption race-free: a peer
+// that dies between the session-map lookup and this call refuses the binding instead of handing
+// the caller a corpse to signal over.
+func (p *Peer) BindSignaling(conn *safeConn) (uint64, bool) {
+	select {
+	case <-p.done:
+		return 0, false
+	default:
+	}
+
+	p.signalMu.Lock()
+	defer p.signalMu.Unlock()
+	if p.signalTimer != nil {
+		p.signalTimer.Stop()
+		p.signalTimer = nil
+	}
+	p.signalGen++
+	p.signalConn = conn
+	return p.signalGen, true
+}
+
+// ReleaseSignaling detaches the binding identified by gen and arms the grace timer. It reports
+// whether gen was still the current binding: false means a newer connection already adopted this
+// peer, and the caller must leave it alone.
+func (p *Peer) ReleaseSignaling(gen uint64) bool {
+	// A peer that is already closed has nothing to wait for. This is the ordinary path after a
+	// deliberate stop: runSignaling handles "bye" by closing inline and returning, and the caller's
+	// deferred release then arrives to find the peer gone. Arming a grace timer here would pin a
+	// dead peer in the timer heap for 90 seconds and end by setting closedByFailure on it -- which
+	// close() has already run past, but which is precisely the flag the bye path exists to avoid.
+	select {
+	case <-p.done:
+		return false
+	default:
+	}
+
+	p.signalMu.Lock()
+	defer p.signalMu.Unlock()
+	if p.signalGen != gen {
+		return false
+	}
+	p.signalConn = nil
+	if p.signalTimer != nil {
+		p.signalTimer.Stop()
+	}
+	p.signalTimer = time.AfterFunc(signalingGrace, func() {
+		// Re-check under the lock: the timer may already have been overtaken by an adoption that
+		// landed while AfterFunc was being scheduled.
+		p.signalMu.Lock()
+		stale := p.signalGen != gen
+		p.signalMu.Unlock()
+		if stale {
+			return
+		}
+		p.logger.Warn("signaling grace expired with no reconnect, closing peer",
+			zap.Duration("grace", signalingGrace),
+		)
+		p.closedByFailure.Store(true)
+		p.close()
+	})
+	return true
+}
+
+// writeSignal sends v over whichever signaling connection is currently bound. A peer between
+// connections has none, and dropping the message is correct there: everything sent this way is
+// per-negotiation (ICE candidates), so it is meaningless to the next connection anyway -- that one
+// arrives with its own offer and gathers its own candidates.
+func (p *Peer) writeSignal(v any) error {
+	p.signalMu.Lock()
+	conn := p.signalConn
+	p.signalMu.Unlock()
+	if conn == nil {
+		return nil
+	}
+	return conn.WriteJSON(v)
+}
+
+// IsAlive reports whether this peer can still be adopted.
+func (p *Peer) IsAlive() bool {
+	select {
+	case <-p.done:
+		return false
+	default:
+		return true
+	}
+}
+
 func (p *Peer) handleVideoTrack(track *webrtc.TrackRemote) {
 	if track.Codec().MimeType != webrtc.MimeTypeH264 {
 		p.logger.Error("unexpected video codec, recording disabled", 
@@ -918,6 +1038,17 @@ func (p *Peer) Close() {
 func (p *Peer) close() {
 	p.once.Do(func() {
 		close(p.done)
+		// Drop the signaling binding and its grace timer up front: whatever reason brought us here,
+		// this peer will never signal again, and a live AfterFunc would otherwise pin it in the
+		// timer heap for the rest of the grace window.
+		p.signalMu.Lock()
+		p.signalConn = nil
+		if p.signalTimer != nil {
+			p.signalTimer.Stop()
+			p.signalTimer = nil
+		}
+		p.signalMu.Unlock()
+
 		duration := int64(time.Since(p.startedAt).Seconds())
 		ctx := context.Background()
 

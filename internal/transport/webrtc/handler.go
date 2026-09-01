@@ -27,7 +27,27 @@ type SignalMessage struct {
 	Type      string                   `json:"type"`
 	SDP       string                   `json:"sdp,omitempty"`
 	Candidate *webrtc.ICECandidateInit `json:"candidate,omitempty"`
+	// StreamID is sent on "stream-ready"/"stream-resumed" so the client knows which stream it is
+	// currently on, and can hand it back as ?resumeStreamId= if its signaling socket drops. Empty
+	// on every other message type.
+	StreamID string `json:"streamId,omitempty"`
 }
+
+// Signaling message types sent by the server to tell a client which stream it is attached to.
+//
+//	stream-ready   -- this connection owns a NEW stream with this id.
+//	stream-resumed -- this connection re-attached to the stream it named, which kept running.
+//
+// A client that ignores both keeps working exactly as before; it just never resumes and gets a new
+// stream id on every reconnect, which is what every client did before continuity existed.
+const (
+	msgStreamReady   = "stream-ready"
+	msgStreamResumed = "stream-resumed"
+)
+
+// msgBye is sent by the CLIENT, the only direction that knows the difference between a socket that
+// broke and a stream that is over. See its handler in runSignaling.
+const msgBye = "bye"
 
 type Handler struct {
 	peerCfg   PeerConfig
@@ -242,6 +262,23 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rawConn.Close()
 
+	// A reconnecting client names the stream it was on. If that stream is still alive, take over its
+	// signaling instead of minting a new one -- see adoptPeer for why this is the whole point.
+	if resumeStreamID := q.Get("resumeStreamId"); resumeStreamID != "" {
+		if adopted := h.adoptPeer(conn, scheduleID, participantID, streamType, resumeStreamID); adopted {
+			return
+		}
+		// Fall through and start a fresh stream. Nothing is wrong here: the peer aged out of its
+		// grace, or ICE failed underneath it, or this is a genuine re-entry. The client finds out
+		// which because the stream-ready below carries a different id than the one it asked for.
+		h.logger.Info("resume requested but no adoptable peer; starting a new stream",
+			zap.String("scheduleId", scheduleID),
+			zap.String("participantId", participantID),
+			zap.String("streamType", streamType),
+			zap.String("requestedStreamId", resumeStreamID),
+		)
+	}
+
 	peer, err := NewPeer(h.peerCfg, scheduleID, claims.SessionID, participantID, streamType, h.streamUseCase, h.monitorUseCase, h.storage, h.segments, h.hlsFragments, h.logger)
 	if err != nil {
 		h.logger.Error("peer creation failed", zap.Error(err))
@@ -297,20 +334,47 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if old := h.sessions.Replace(scheduleID, participantID, streamType, peer); old != nil {
-		old.Close() // explicit close, clear ownership
-		h.logger.Info("replaced existing peer on reconnect", 
-			zap.String("scheduleId", scheduleID), 
-			zap.String("participantId", participantID), 
+		h.logger.Info("replaced existing peer on reconnect",
+			zap.String("scheduleId", scheduleID),
+			zap.String("participantId", participantID),
 			zap.String("streamType", streamType),
+			zap.String("oldStreamId", old.streamID),
 		)
+		// Closed in the background, NOT inline: Peer.close drains the previous stream's segment
+		// uploads to S3 under a 60s cap (ffmpegUploadDrainTimeout) plus ffmpeg's own stop timeout.
+		// Inline, every second of that lands between this student's WebSocket upgrade and the offer
+		// exchange in runSignaling below -- the reconnect handshake stalls behind the archival work
+		// of the connection it is replacing. That is exactly backwards: the drain is bookkeeping for
+		// a stream that has already ended, while the student on the other end is sitting in front of
+		// an exam waiting for their camera to come back.
+		//
+		// Safe to detach because ownership was already transferred by Replace above: the map now
+		// points at the new peer, the old peer's own defer uses RemoveIfSame so it cannot evict it,
+		// and Peer.close is guarded by sync.Once so this racing with that defer collapses to one
+		// teardown.
+		//
+		// Costs a brief overlap where both peers hold a RecordSem slot. That is the right trade --
+		// the slot is released as soon as ffmpeg is confirmed dead (see StopProcess in Peer.close),
+		// well before the uploads finish, and the new peer does not ask for a slot until both its
+		// tracks have arrived.
+		go old.Close()
 	}
 
-	defer func() {
+	// End-of-life bookkeeping now hangs off the PEER's death rather than this request's return.
+	//
+	// It used to be a defer here, which quietly asserted that the stream ends when the WebSocket
+	// ends. That is the assumption this whole change exists to remove: a signaling socket can drop
+	// and come back while ICE, the tracks and the recording never faltered, and stamping MarkEnded
+	// at the socket's death wrote an end time into the index for a stream that was still running.
+	//
+	// Firing on peer.done also stamps a TRUER time than the old placement did. done closes at the
+	// top of Peer.close, ahead of the segment/HLS drain, so the recorded end time is when the stream
+	// actually stopped rather than when its uploads finished minutes later.
+	go func() {
+		<-peer.done
 		h.sessions.RemoveIfSame(scheduleID, participantID, streamType, peer)
-		peer.Close()
-		// Stamped here rather than inside Peer.close so the peer stays unaware of the index. A fresh
-		// context because r.Context() is already cancelled by the time this defer runs -- the request
-		// is over, which is exactly what this line is recording.
+		// A fresh context on purpose: r.Context() belongs to the request that opened the stream and
+		// is long cancelled by the time a peer that outlived its socket finally closes.
 		if err := h.scheduleStreams.MarkEnded(context.Background(), scheduleID, peer.streamID, time.Now().UTC()); err != nil {
 			h.logger.Warn("mark schedule stream ended failed",
 				zap.String("streamId", peer.streamID),
@@ -319,18 +383,96 @@ func (h *Handler) ServeStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// Reads the peer's CURRENT signaling connection rather than closing over this one, so candidates
+	// gathered after an ICE restart go to whichever socket is attached by then.
 	peer.pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
 			return
 		}
 		init := c.ToJSON()
-		_ = conn.WriteJSON(SignalMessage{
+		_ = peer.writeSignal(SignalMessage{
 			Type:      "ice-candidate",
 			Candidate: &init,
 		})
 	})
-	h.runSignaling(conn, peer)
 
+	gen, ok := peer.BindSignaling(conn)
+	if !ok {
+		// Only reachable if the peer died between NewPeer and here.
+		h.logger.Warn("peer closed before signaling could bind", zap.String("streamId", peer.streamID))
+		peer.Close()
+		return
+	}
+	// Told before any negotiation so the client is holding the id even if the socket dies during the
+	// offer exchange -- that early window is exactly when a fragile link tends to fail.
+	if err := conn.WriteJSON(SignalMessage{Type: msgStreamReady, StreamID: peer.streamID}); err != nil {
+		h.logger.Warn("send stream-ready failed", zap.String("streamId", peer.streamID), zap.Error(err))
+	}
+
+	defer h.releaseSignaling(peer, gen)
+	h.runSignaling(conn, peer)
+}
+
+// adoptPeer re-attaches a reconnecting client to the stream it names, keeping the stream id, the
+// ffmpeg recording, the HLS playlist and the segment registry entry it already owns. Reports
+// whether the connection was served; false means the caller should start a fresh stream.
+//
+// Why this exists: ServeStream used to call NewPeer on every upgrade, so a dropped signaling socket
+// necessarily produced a new stream id, a new playlist and a split recording -- on the wire,
+// disconnected -> left -> joined(new id), which is indistinguishable from the student closing the
+// app and re-entering. An ordinary network blip therefore spent a signal that should mean something
+// much rarer, and left the proctor's evidence trail cut in two for no reason.
+//
+// What makes it safe is that the peer's WebRTC connection is untouched: this is the same
+// PeerConnection on both ends, so there is no DTLS re-handshake to negotiate. The client keeps its
+// own peer across the socket reconnect and follows up with an ICE restart, which runSignaling
+// already accepts as an ordinary offer.
+//
+// Authorization is inherited, not re-derived: scheduleID and streamType were checked against the
+// token by the caller and participantID IS the token's candidate id, so the session key can only
+// ever address this candidate's own stream. The id match on top of that means a client cannot
+// resume a stream it was never on, even one of its own from an earlier attempt.
+func (h *Handler) adoptPeer(conn *safeConn, scheduleID, participantID, streamType, resumeStreamID string) bool {
+	peer := h.sessions.Get(scheduleID, participantID, streamType)
+	if peer == nil || peer.streamID != resumeStreamID || !peer.IsAlive() {
+		return false
+	}
+
+	gen, ok := peer.BindSignaling(conn)
+	if !ok {
+		// Lost a race with the peer's own teardown between IsAlive and here.
+		return false
+	}
+
+	h.logger.Info("adopted existing peer on signaling reconnect",
+		zap.String("scheduleId", scheduleID),
+		zap.String("participantId", participantID),
+		zap.String("streamType", streamType),
+		zap.String("streamId", peer.streamID),
+	)
+	if err := conn.WriteJSON(SignalMessage{Type: msgStreamResumed, StreamID: peer.streamID}); err != nil {
+		h.logger.Warn("send stream-resumed failed", zap.String("streamId", peer.streamID), zap.Error(err))
+	}
+
+	// No Record, no pendingAssembly.Schedule, no sessions.Replace and no MarkEnded goroutine: this
+	// stream is already indexed, already armed, already the registered session, and already has a
+	// reaper from the connection that created it. Adoption adds a socket, nothing else.
+	defer h.releaseSignaling(peer, gen)
+	h.runSignaling(conn, peer)
+	return true
+}
+
+// releaseSignaling detaches this connection from the peer, leaving the peer alive on its grace
+// timer unless a newer connection has already taken it over.
+func (h *Handler) releaseSignaling(peer *Peer, gen uint64) {
+	if !peer.ReleaseSignaling(gen) {
+		// Superseded: another connection adopted this peer while this handler was still unwinding.
+		return
+	}
+	h.logger.Info("signaling detached; peer held for reconnect",
+		zap.String("streamId", peer.streamID),
+		zap.Duration("grace", signalingGrace),
+	)
 }
 
 func (h *Handler) ServeMonitor(w http.ResponseWriter, r *http.Request) {
@@ -816,6 +958,29 @@ func (h *Handler) runSignaling(conn *safeConn, peer *Peer) {
 		}
 
 		switch msg.Type {
+		case msgBye:
+			// The one signal that means "this stream is FINISHED", as opposed to "this socket is".
+			//
+			// Everything else that ends a peer now routes through a grace window, because a socket
+			// dying is no longer evidence the student left -- that is the whole point of the resume
+			// path. But it left the deliberate case with no way to say so: a clean exam end looked
+			// exactly like a network drop, so the peer sat out its grace and was then closed by the
+			// ICE-failed branch, which sets closedByFailure. That flag does two things, and both are
+			// wrong here: it publishes a confidence-1.0 STREAM_DROPPED alert into the proctoring
+			// record of a student who simply finished, and it suppresses MarkComplete, leaving every
+			// recording to wait out the full assembly grace before anything would build it.
+			//
+			// Closing inline and WITHOUT closedByFailure restores what the old unconditional
+			// teardown gave for free, while keeping the grace for every exit that is not announced.
+			// A client that never sends this is not broken, only slower: it falls back to the grace
+			// path, which is exactly where it was before.
+			h.logger.Info("client signalled a deliberate stop",
+				zap.String("streamId", peer.streamID),
+				zap.String("scheduleId", peer.scheduleID),
+				zap.String("participantId", peer.participantID),
+			)
+			peer.Close()
+			return
 		case "offer":
 			answer, err := peer.HandleOffer(msg.SDP)
 			if err != nil {

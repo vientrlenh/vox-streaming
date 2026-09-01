@@ -27,11 +27,31 @@ func (m *SessionManager) Add(scheduleID, participantID, streamType string, p *Pe
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if old, ok := m.sessions[key]; ok {
-		old.close()
-	}
+	old, ok := m.sessions[key]
 	m.sessions[key] = p
+	m.mu.Unlock()
+
+	// Outside the lock, and in its own goroutine, for the same reason ServeStream detaches its
+	// replacement close: Peer.close drains segment uploads under a 60s cap. Holding the write lock
+	// across that would block EVERY session operation process-wide -- Replace, RemoveIfSame and
+	// SchedulePeers all contend on this one mutex, so a single slow S3 drain would freeze new
+	// connections and monitor snapshots for every schedule on the instance, not just this one.
+	if ok && old != nil {
+		go old.Close()
+	}
+}
+
+// Get returns the peer currently registered for this key, or nil. Used by ServeStream to find a
+// peer worth adopting when a student's signaling socket comes back; the caller still has to prove
+// the reconnect refers to that exact stream and that the peer is alive.
+func (m *SessionManager) Get(scheduleID, participantID, streamType string) *Peer {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sessions[sessionKey{
+		scheduleID:    scheduleID,
+		participantID: participantID,
+		streamType:    streamType,
+	}]
 }
 
 func (m *SessionManager) Replace(scheduleID, participantID, streamType string, p *Peer) *Peer {
