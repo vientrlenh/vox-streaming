@@ -136,10 +136,10 @@ const (
 // lần thêm loại cảnh báo tiếp theo.
 func DefaultAlertLevel(alertType string) AlertLevel {
 	switch alertType {
-	case AlertPhoneDetected, AlertMultiplePersons, AlertProhibitedObject:
+	case AlertPhoneDetected, AlertProhibitedObject:
 		return AlertLevelCritical
 	case AlertPersonMissing, AlertWindowFocusLost, AlertUncooperativeCandidate,
-		AlertCameraSignalLost, AlertStreamDropped, AlertRecordingIncomplete:
+		AlertCameraSignalLost, AlertStreamDropped, AlertRecordingIncomplete, AlertMultiplePersons:
 		return AlertLevelWarning
 	// Ghi rõ ra dù nhánh default cũng trả INFO: đây là một lựa chọn, không phải một giá trị rơi
 	// vãi. "Không nhận ra loại này" và "loại này chỉ đáng ghi vào sổ" phải phân biệt được ở đây.

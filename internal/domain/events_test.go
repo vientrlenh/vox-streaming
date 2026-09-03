@@ -8,8 +8,8 @@ func TestDefaultAlertLevel(t *testing.T) {
 		want      AlertLevel
 	}{
 		{AlertPhoneDetected, AlertLevelCritical},
-		{AlertMultiplePersons, AlertLevelCritical},
 		{AlertProhibitedObject, AlertLevelCritical},
+		{AlertMultiplePersons, AlertLevelWarning},
 		{AlertPersonMissing, AlertLevelWarning},
 		{AlertUncooperativeCandidate, AlertLevelWarning},
 		{AlertStreamDropped, AlertLevelWarning},
